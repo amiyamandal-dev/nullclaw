@@ -93,8 +93,14 @@ pub fn main() !void {
 // ── Gateway ──────────────────────────────────────────────────────
 
 fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    var port: u16 = 3000;
-    var host: []const u8 = "127.0.0.1";
+    const cfg = yc.config.Config.load(allocator) catch {
+        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+        std.process.exit(1);
+    };
+
+    // Config values are the baseline; CLI flags override them.
+    var port: u16 = cfg.gateway.port;
+    var host: []const u8 = cfg.gateway.host;
 
     var i: usize = 0;
     while (i < sub_args.len) : (i += 1) {
@@ -109,11 +115,6 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
             host = sub_args[i];
         }
     }
-
-    _ = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
-    };
 
     try yc.gateway.run(allocator, host, port);
 }
@@ -121,8 +122,14 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // ── Daemon ───────────────────────────────────────────────────────
 
 fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    var port: u16 = 3000;
-    var host: []const u8 = "127.0.0.1";
+    const cfg = yc.config.Config.load(allocator) catch {
+        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+        std.process.exit(1);
+    };
+
+    // Config values are the baseline; CLI flags override them.
+    var port: u16 = cfg.gateway.port;
+    var host: []const u8 = cfg.gateway.host;
 
     var i: usize = 0;
     while (i < sub_args.len) : (i += 1) {
@@ -137,11 +144,6 @@ fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             host = sub_args[i];
         }
     }
-
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
-    };
 
     try yc.daemon.run(allocator, &cfg, host, port);
 }
