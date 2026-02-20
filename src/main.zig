@@ -60,6 +60,11 @@ fn parseCommand(arg: []const u8) ?Command {
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 pub fn main() !void {
+    // Enable UTF-8 output on Windows console (fixes Cyrillic/Unicode garbling)
+    if (comptime builtin.os.tag == .windows) {
+        _ = std.os.windows.kernel32.SetConsoleOutputCP(65001);
+    }
+
     const allocator = comptime alloc: {
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) break :alloc debug_allocator.allocator();
         break :alloc std.heap.smp_allocator;
@@ -1059,12 +1064,13 @@ fn runAuthImportCodex(
     codex: type,
     auth_mod: type,
 ) void {
-    const home = std.posix.getenv("HOME") orelse {
+    const home = yc.platform.getHomeDir(allocator) catch {
         std.debug.print("HOME not set.\n", .{});
         std.process.exit(1);
     };
+    defer allocator.free(home);
 
-    const path = std.fmt.allocPrint(allocator, "{s}/.codex/auth.json", .{home}) catch {
+    const path = std.fs.path.join(allocator, &.{ home, ".codex", "auth.json" }) catch {
         std.debug.print("Out of memory.\n", .{});
         std.process.exit(1);
     };

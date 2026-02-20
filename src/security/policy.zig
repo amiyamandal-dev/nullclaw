@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const RateTracker = @import("tracker.zig").RateTracker;
 
 /// How much autonomy the agent has
@@ -59,13 +60,27 @@ pub const default_allowed_commands = [_][]const u8{
     "git", "npm", "cargo", "ls", "cat", "grep", "find", "echo", "pwd", "wc", "head", "tail",
 };
 
-/// Default forbidden paths
-pub const default_forbidden_paths = [_][]const u8{
+/// Default forbidden paths (Unix)
+const default_forbidden_paths_unix = [_][]const u8{
     "/etc",     "/root",  "/home",     "/usr",  "/bin",
     "/sbin",    "/lib",   "/opt",      "/boot", "/dev",
     "/proc",    "/sys",   "/var",      "/tmp",  "~/.ssh",
     "~/.gnupg", "~/.aws", "~/.config",
 };
+
+/// Default forbidden paths (Windows)
+const default_forbidden_paths_windows = [_][]const u8{
+    "C:\\Windows",     "C:\\Program Files", "C:\\Program Files (x86)",
+    "C:\\ProgramData", "C:\\System32",      "C:\\Recovery",
+    "~/.ssh",          "~/.gnupg",          "~/.aws",
+    "~/.config",
+};
+
+/// Default forbidden paths — platform-selected at comptime
+pub const default_forbidden_paths: []const []const u8 = if (@import("builtin").os.tag == .windows)
+    &default_forbidden_paths_windows
+else
+    &default_forbidden_paths_unix;
 
 /// Security policy enforced on all tool executions
 pub const SecurityPolicy = struct {
@@ -73,7 +88,7 @@ pub const SecurityPolicy = struct {
     workspace_dir: []const u8 = ".",
     workspace_only: bool = true,
     allowed_commands: []const []const u8 = &default_allowed_commands,
-    forbidden_paths: []const []const u8 = &default_forbidden_paths,
+    forbidden_paths: []const []const u8 = default_forbidden_paths,
     max_actions_per_hour: u32 = 20,
     max_cost_per_day_cents: u32 = 500,
     require_approval_for_medium_risk: bool = true,
@@ -170,6 +185,11 @@ pub const SecurityPolicy = struct {
             return false;
         }
 
+        // Block Windows %VAR% environment variable expansion (cmd.exe attack surface)
+        if (comptime @import("builtin").os.tag == .windows) {
+            if (hasPercentVar(command)) return false;
+        }
+
         // Block `tee` — can write to arbitrary files, bypassing redirect checks
         {
             var words_iter = std.mem.tokenizeAny(u8, command, " \t\n;|");
@@ -233,14 +253,15 @@ pub const SecurityPolicy = struct {
         // Block URL-encoded traversal
         var lower_buf: [4096]u8 = undefined;
         const lower = toLowerSlice(path, &lower_buf);
-        if (containsStr(lower, "..%2f") or containsStr(lower, "%2f..")) return false;
+        if (containsStr(lower, "..%2f") or containsStr(lower, "%2f..") or
+            containsStr(lower, "..%5c") or containsStr(lower, "%5c..")) return false;
 
         // Expand tilde
         var expanded_buf: [4096]u8 = undefined;
         const expanded = expandTilde(path, &expanded_buf);
 
         // Block absolute paths when workspace_only is set
-        if (self.workspace_only and expanded.len > 0 and expanded[0] == '/') return false;
+        if (self.workspace_only and expanded.len > 0 and std.fs.path.isAbsolute(expanded)) return false;
 
         // Block forbidden paths
         var fb_buf: [4096]u8 = undefined;
@@ -343,12 +364,9 @@ fn skipEnvAssignments(s: []const u8) []const u8 {
     }
 }
 
-/// Extract basename from a path (everything after last '/')
+/// Extract basename from a path (everything after last separator)
 fn extractBasename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-        return path[idx + 1 ..];
-    }
-    return path;
+    return std.fs.path.basename(path);
 }
 
 /// Check if a command basename is in the high-risk set
@@ -412,29 +430,43 @@ fn isCargoMediumVerb(verb: []const u8) bool {
     return false;
 }
 
-/// Check if a path has ".." as a component
+/// Check if a path has ".." as a component (handles both `/` and `\` separators)
 fn hasParentDirComponent(path: []const u8) bool {
-    var iter = std.mem.splitScalar(u8, path, '/');
+    var iter = std.mem.splitAny(u8, path, "/\\");
     while (iter.next()) |component| {
         if (std.mem.eql(u8, component, "..")) return true;
     }
     return false;
 }
 
-/// Expand ~ to HOME env var
+/// Expand ~ to home directory.
+/// On Unix uses zero-allocation std.posix.getenv; on Windows falls back to
+/// page_allocator (acceptable since daemon mode is not yet supported there).
 fn expandTilde(path: []const u8, buf: []u8) []const u8 {
-    if (path.len >= 2 and path[0] == '~' and path[1] == '/') {
-        if (std.posix.getenv("HOME")) |home| {
-            const rest = path[1..]; // includes the '/'
-            const total = home.len + rest.len;
-            if (total <= buf.len) {
-                @memcpy(buf[0..home.len], home);
-                @memcpy(buf[home.len..][0..rest.len], rest);
-                return buf[0..total];
-            }
-        }
+    if (path.len < 2 or path[0] != '~') return path;
+    const is_sep = if (comptime @import("builtin").os.tag == .windows)
+        (path[1] == '/' or path[1] == '\\')
+    else
+        path[1] == '/';
+    if (!is_sep) return path;
+
+    if (comptime @import("builtin").os.tag == .windows) {
+        const home = platform.getEnvOrNull(std.heap.page_allocator, "USERPROFILE") orelse return path;
+        defer std.heap.page_allocator.free(home);
+        return tildeReplace(home, path, buf);
+    } else {
+        const home = std.posix.getenv("HOME") orelse return path;
+        return tildeReplace(home, path, buf);
     }
-    return path;
+}
+
+fn tildeReplace(home: []const u8, path: []const u8, buf: []u8) []const u8 {
+    const rest = path[1..]; // includes the separator
+    const total = home.len + rest.len;
+    if (total > buf.len) return path;
+    @memcpy(buf[0..home.len], home);
+    @memcpy(buf[home.len..][0..rest.len], rest);
+    return buf[0..total];
 }
 
 /// Check if path starts with prefix (path-component-aware)
@@ -444,7 +476,8 @@ fn pathStartsWith(path: []const u8, prefix: []const u8) bool {
     if (!std.mem.eql(u8, path[0..prefix.len], prefix)) return false;
     // Must match at component boundary
     if (path.len == prefix.len) return true;
-    return path[prefix.len] == '/';
+    const c = path[prefix.len];
+    return c == '/' or c == '\\';
 }
 
 /// Check for dangerous arguments that allow sub-command execution.
@@ -487,6 +520,21 @@ fn isArgsSafe(base_cmd: []const u8, full_cmd: []const u8) bool {
 
 fn containsStr(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+/// Detect `%VARNAME%` patterns used by cmd.exe for environment variable expansion.
+fn hasPercentVar(s: []const u8) bool {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '%') {
+            // Look for closing %
+            if (std.mem.indexOfScalarPos(u8, s, i + 1, '%')) |end| {
+                if (end > i + 1) return true; // non-empty %VAR%
+                i = end; // skip %% (literal percent escape)
+            }
+        }
+    }
+    return false;
 }
 
 /// Fixed-size buffer for lowercase conversion
@@ -718,9 +766,16 @@ test "absolute paths allowed when not workspace only" {
 }
 
 test "forbidden paths blocked" {
+    const builtin_mod = @import("builtin");
     const p = SecurityPolicy{ .workspace_only = false };
-    try std.testing.expect(!p.isPathAllowed("/etc/passwd"));
-    try std.testing.expect(!p.isPathAllowed("/root/.bashrc"));
+    if (comptime builtin_mod.os.tag == .windows) {
+        try std.testing.expect(!p.isPathAllowed("C:\\Windows\\system32\\cmd.exe"));
+        try std.testing.expect(!p.isPathAllowed("C:\\ProgramData\\secret"));
+    } else {
+        try std.testing.expect(!p.isPathAllowed("/etc/passwd"));
+        try std.testing.expect(!p.isPathAllowed("/root/.bashrc"));
+    }
+    // Tilde paths are in both platform lists
     try std.testing.expect(!p.isPathAllowed("~/.ssh/id_rsa"));
     try std.testing.expect(!p.isPathAllowed("~/.gnupg/pubring.kbx"));
 }
@@ -927,6 +982,7 @@ test "tilde paths handled" {
 }
 
 test "forbidden paths include critical system dirs" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
     const p = SecurityPolicy{ .workspace_only = false };
     try std.testing.expect(!p.isPathAllowed("/etc/shadow"));
     try std.testing.expect(!p.isPathAllowed("/proc/1/status"));
@@ -1024,17 +1080,32 @@ test "default allowed commands includes expected tools" {
 }
 
 test "default forbidden paths includes sensitive dirs" {
-    var found_etc = false;
+    const builtin_mod = @import("builtin");
     var found_ssh = false;
-    var found_proc = false;
-    for (&default_forbidden_paths) |path| {
-        if (std.mem.eql(u8, path, "/etc")) found_etc = true;
+    for (default_forbidden_paths) |path| {
         if (std.mem.eql(u8, path, "~/.ssh")) found_ssh = true;
-        if (std.mem.eql(u8, path, "/proc")) found_proc = true;
     }
-    try std.testing.expect(found_etc);
     try std.testing.expect(found_ssh);
-    try std.testing.expect(found_proc);
+
+    if (comptime builtin_mod.os.tag == .windows) {
+        var found_windows = false;
+        var found_progfiles = false;
+        for (default_forbidden_paths) |path| {
+            if (std.mem.eql(u8, path, "C:\\Windows")) found_windows = true;
+            if (std.mem.eql(u8, path, "C:\\Program Files")) found_progfiles = true;
+        }
+        try std.testing.expect(found_windows);
+        try std.testing.expect(found_progfiles);
+    } else {
+        var found_etc = false;
+        var found_proc = false;
+        for (default_forbidden_paths) |path| {
+            if (std.mem.eql(u8, path, "/etc")) found_etc = true;
+            if (std.mem.eql(u8, path, "/proc")) found_proc = true;
+        }
+        try std.testing.expect(found_etc);
+        try std.testing.expect(found_proc);
+    }
 }
 
 test "blocks single ampersand background chaining" {
@@ -1116,4 +1187,23 @@ test "echo text >(cat) is blocked" {
     const p = SecurityPolicy{};
     try std.testing.expect(!p.isCommandAllowed("echo text >(cat)"));
     try std.testing.expect(!p.isCommandAllowed("ls >(cat /etc/passwd)"));
+}
+
+// ── Windows security tests ──────────────────────────────────────
+
+test "path traversal with backslash blocked" {
+    const p = SecurityPolicy{};
+    try std.testing.expect(!p.isPathAllowed("..\\..\\etc\\passwd"));
+    try std.testing.expect(!p.isPathAllowed("foo\\..\\..\\secret"));
+    try std.testing.expect(!p.isPathAllowed("a\\..\\b"));
+}
+
+test "hasPercentVar detects patterns" {
+    try std.testing.expect(hasPercentVar("%PATH%"));
+    try std.testing.expect(hasPercentVar("echo %USERPROFILE%\\secret"));
+    try std.testing.expect(hasPercentVar("cmd /c %COMSPEC%"));
+    // %% is an escape for literal %, not a variable reference
+    try std.testing.expect(!hasPercentVar("100%%"));
+    try std.testing.expect(!hasPercentVar("no percent here"));
+    try std.testing.expect(!hasPercentVar(""));
 }

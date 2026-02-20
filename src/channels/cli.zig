@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const root = @import("root.zig");
 
 /// CLI channel — reads from stdin, writes to stdout.
@@ -187,9 +188,9 @@ pub fn saveHistory(history: []const []const u8, path: []const u8) !void {
 /// Resolve the default history file path (~/.nullclaw_history).
 /// Caller owns the returned string.
 pub fn defaultHistoryPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try platform.getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw_history", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw_history" });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -211,14 +212,20 @@ test "cli quit commands" {
 test "loadHistory reads file lines" {
     const allocator = std.testing.allocator;
 
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "history_test" });
+    defer allocator.free(tmp_path);
+
     // Write a temporary history file
-    const tmp_path = "/tmp/nullclaw_test_history";
     {
         const f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("hello world\nhow are you\ngoodbye\n");
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     const history = try loadHistory(allocator, tmp_path);
     defer freeHistory(allocator, history);
@@ -231,15 +238,30 @@ test "loadHistory reads file lines" {
 
 test "loadHistory returns empty for missing file" {
     const allocator = std.testing.allocator;
-    const history = try loadHistory(allocator, "/tmp/nullclaw_nonexistent_history_file");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "nonexistent_history_file" });
+    defer allocator.free(tmp_path);
+
+    const history = try loadHistory(allocator, tmp_path);
     defer freeHistory(allocator, history);
     try std.testing.expectEqual(@as(usize, 0), history.len);
 }
 
 test "saveHistory writes file" {
     const allocator = std.testing.allocator;
-    const tmp_path = "/tmp/nullclaw_test_save_history";
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "save_history_test" });
+    defer allocator.free(tmp_path);
 
     const entries = [_][]const u8{ "first", "second", "third" };
     try saveHistory(&entries, tmp_path);
@@ -256,8 +278,14 @@ test "saveHistory writes file" {
 
 test "saveHistory and loadHistory roundtrip" {
     const allocator = std.testing.allocator;
-    const tmp_path = "/tmp/nullclaw_test_roundtrip_history";
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "roundtrip_history_test" });
+    defer allocator.free(tmp_path);
 
     // Save
     const entries = [_][]const u8{ "alpha", "beta" };
@@ -274,13 +302,20 @@ test "saveHistory and loadHistory roundtrip" {
 
 test "loadHistory trims whitespace from entries" {
     const allocator = std.testing.allocator;
-    const tmp_path = "/tmp/nullclaw_test_trim_history";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "trim_history_test" });
+    defer allocator.free(tmp_path);
+
     {
         const f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("  hello  \n\t world \t\nfoo\r\n");
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     const history = try loadHistory(allocator, tmp_path);
     defer freeHistory(allocator, history);
@@ -293,13 +328,20 @@ test "loadHistory trims whitespace from entries" {
 
 test "loadHistory skips blank lines" {
     const allocator = std.testing.allocator;
-    const tmp_path = "/tmp/nullclaw_test_blank_history";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "blank_history_test" });
+    defer allocator.free(tmp_path);
+
     {
         const f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("first\n\n   \n\nsecond\n  \nthird\n");
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     const history = try loadHistory(allocator, tmp_path);
     defer freeHistory(allocator, history);
@@ -312,7 +354,15 @@ test "loadHistory skips blank lines" {
 
 test "loadHistory enforces max entries limit" {
     const allocator = std.testing.allocator;
-    const tmp_path = "/tmp/nullclaw_test_max_history";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const tmp_path = try std.fs.path.join(allocator, &.{ base, "max_history_test" });
+    defer allocator.free(tmp_path);
+
     {
         const f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer f.close();
@@ -323,7 +373,6 @@ test "loadHistory enforces max entries limit" {
             f.writeAll(line) catch break;
         }
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     const history = try loadHistory(allocator, tmp_path);
     defer freeHistory(allocator, history);

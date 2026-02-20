@@ -76,8 +76,8 @@ pub const DaemonState = struct {
 /// Compute the path to daemon_state.json from config.
 pub fn stateFilePath(allocator: std.mem.Allocator, config: *const Config) ![]u8 {
     // Use config directory (parent of config_path)
-    if (std.mem.lastIndexOfScalar(u8, config.config_path, '/')) |idx| {
-        return std.fmt.allocPrint(allocator, "{s}/daemon_state.json", .{config.config_path[0..idx]});
+    if (std.fs.path.dirname(config.config_path)) |dir| {
+        return std.fs.path.join(allocator, &.{ dir, "daemon_state.json" });
     }
     return allocator.dupe(u8, "daemon_state.json");
 }
@@ -549,7 +549,9 @@ test "stateFilePath derives from config_path" {
     };
     const path = try stateFilePath(std.testing.allocator, &config);
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/home/user/.nullclaw/daemon_state.json", path);
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ "/home/user/.nullclaw", "daemon_state.json" });
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path);
 }
 
 test "scheduler backoff constants" {
@@ -623,7 +625,13 @@ test "writeStateFile produces valid content" {
     state.addComponent("test-comp");
 
     // Write to a temp path
-    const path = "/tmp/nullclaw-test-daemon-state.json";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    defer std.testing.allocator.free(path);
+
     try writeStateFile(std.testing.allocator, path, &state);
 
     // Read back and verify
@@ -635,7 +643,4 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
-
-    // Cleanup
-    std.fs.deleteFileAbsolute(path) catch {};
 }

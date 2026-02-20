@@ -9,6 +9,7 @@
 //!   - Provider/model selection with curated defaults
 
 const std = @import("std");
+const platform = @import("platform.zig");
 const config_mod = @import("config.zig");
 const Config = config_mod.Config;
 const memory_root = @import("memory/root.zig");
@@ -169,11 +170,11 @@ fn dupeFallbackModels(allocator: std.mem.Allocator, provider: []const u8) ![][]c
 /// Returns at most 20 model IDs. Caller ALWAYS owns the returned slice and strings.
 /// Free with: for (models) |m| allocator.free(m); allocator.free(models);
 pub fn fetchModels(allocator: std.mem.Allocator, provider: []const u8, api_key: ?[]const u8) ![][]const u8 {
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch
+    const home = platform.getHomeDir(allocator) catch
         return dupeFallbackModels(allocator, provider);
     defer allocator.free(home);
 
-    const state_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/state", .{home});
+    const state_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw", "state" });
     defer allocator.free(state_dir);
 
     // Ensure state directory exists
@@ -797,15 +798,15 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
     try out.flush();
 
     // Build cache path
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+    const home = platform.getHomeDir(allocator) catch {
         try out.writeAll("Could not determine HOME directory.\n");
         try out.flush();
         return;
     };
     defer allocator.free(home);
-    const cache_path = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/models_cache.json", .{home});
+    const cache_path = try std.fs.path.join(allocator, &.{ home, ".nullclaw", "models_cache.json" });
     defer allocator.free(cache_path);
-    const cache_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw", .{home});
+    const cache_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
     defer allocator.free(cache_dir);
 
     // Ensure directory exists
@@ -1138,15 +1139,15 @@ pub fn defaultBackendKey() []const u8 {
 // ── Path helpers ─────────────────────────────────────────────────
 
 fn getDefaultWorkspace(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try platform.getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw/workspace", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "workspace" });
 }
 
 fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try platform.getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw/config.json", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "config.json" });
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -1207,19 +1208,17 @@ test "BANNER contains descriptive text" {
 }
 
 test "scaffoldWorkspace creates files in temp dir" {
-    const dir = "/tmp/nullclaw-test-scaffold";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
 
     const ctx = ProjectContext{};
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(std.testing.allocator, base, &ctx);
 
     // Verify files were created
-    const memory_path = "/tmp/nullclaw-test-scaffold/MEMORY.md";
-    const file = try std.fs.openFileAbsolute(memory_path, .{});
+    const file = try tmp.dir.openFile("MEMORY.md", .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);
@@ -1228,17 +1227,16 @@ test "scaffoldWorkspace creates files in temp dir" {
 }
 
 test "scaffoldWorkspace is idempotent" {
-    const dir = "/tmp/nullclaw-test-scaffold-idempotent";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
 
     const ctx = ProjectContext{};
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(std.testing.allocator, base, &ctx);
     // Running again should not fail
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(std.testing.allocator, base, &ctx);
 }
 
 // ── Additional onboard tests ────────────────────────────────────
@@ -1357,17 +1355,15 @@ test "personaTemplate contains core traits" {
 }
 
 test "scaffoldWorkspace creates PERSONA.md" {
-    const dir = "/tmp/nullclaw-test-scaffold-persona";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
 
-    const path = "/tmp/nullclaw-test-scaffold-persona/PERSONA.md";
-    const file = try std.fs.openFileAbsolute(path, .{});
+    try scaffoldWorkspace(std.testing.allocator, base, &ProjectContext{});
+
+    const file = try tmp.dir.openFile("PERSONA.md", .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);
@@ -1376,17 +1372,15 @@ test "scaffoldWorkspace creates PERSONA.md" {
 }
 
 test "scaffoldWorkspace creates RULES.md" {
-    const dir = "/tmp/nullclaw-test-scaffold-rules";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
 
-    const path = "/tmp/nullclaw-test-scaffold-rules/RULES.md";
-    const file = try std.fs.openFileAbsolute(path, .{});
+    try scaffoldWorkspace(std.testing.allocator, base, &ProjectContext{});
+
+    const file = try tmp.dir.openFile("RULES.md", .{});
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 4096);
     defer std.testing.allocator.free(content);
@@ -1395,18 +1389,16 @@ test "scaffoldWorkspace creates RULES.md" {
 }
 
 test "scaffoldWorkspace creates memory subdirectory" {
-    const dir = "/tmp/nullclaw-test-scaffold-memdir";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    try scaffoldWorkspace(std.testing.allocator, base, &ProjectContext{});
 
     // Verify memory/ subdirectory exists
-    const mem_dir = "/tmp/nullclaw-test-scaffold-memdir/memory";
-    var d = try std.fs.openDirAbsolute(mem_dir, .{});
+    var d = try tmp.dir.openDir("memory", .{});
     d.close();
 }
 
@@ -1544,14 +1536,13 @@ test "bootstrapTemplate is non-empty" {
 }
 
 test "scaffoldWorkspace creates all prompt.zig files" {
-    const dir = "/tmp/nullclaw-test-scaffold-all";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    try scaffoldWorkspace(std.testing.allocator, base, &ProjectContext{});
 
     // Verify all files that prompt.zig tries to load exist
     const files = [_][]const u8{
@@ -1561,9 +1552,7 @@ test "scaffoldWorkspace creates all prompt.zig files" {
         "BOOTSTRAP.md",
     };
     for (files) |filename| {
-        const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ dir, filename });
-        defer std.testing.allocator.free(path);
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        const file = tmp.dir.openFile(filename, .{}) catch |err| {
             std.debug.print("Missing file: {s} (error: {})\n", .{ filename, err });
             return err;
         };
@@ -1659,19 +1648,26 @@ test "parseModelIds skips entries without id" {
 }
 
 test "cache read returns error for missing file" {
-    const result = readCachedModels(std.testing.allocator, "/tmp/nonexistent-cache-12345.json", "openai");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const missing_path = try std.fs.path.join(std.testing.allocator, &.{ base, "nonexistent-cache-12345.json" });
+    defer std.testing.allocator.free(missing_path);
+
+    const result = readCachedModels(std.testing.allocator, missing_path, "openai");
     try std.testing.expectError(error.CacheNotFound, result);
 }
 
 test "cache round-trip: write then read fresh cache" {
-    const cache_dir = "/tmp/nullclaw-test-cache-rt";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    const cache_path = "/tmp/nullclaw-test-cache-rt/models_cache.json";
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const cache_path = try std.fs.path.join(std.testing.allocator, &.{ base, "models_cache.json" });
+    defer std.testing.allocator.free(cache_path);
 
     // Write cache
     const models = [_][]const u8{
@@ -1695,14 +1691,13 @@ test "cache round-trip: write then read fresh cache" {
 }
 
 test "cache read returns error for wrong provider" {
-    const cache_dir = "/tmp/nullclaw-test-cache-wrongprov";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    const cache_path = "/tmp/nullclaw-test-cache-wrongprov/models_cache.json";
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const cache_path = try std.fs.path.join(std.testing.allocator, &.{ base, "models_cache.json" });
+    defer std.testing.allocator.free(cache_path);
 
     const models = [_][]const u8{"model-a"};
     try saveCachedModels(std.testing.allocator, cache_path, "provA", &models);
@@ -1713,18 +1708,17 @@ test "cache read returns error for wrong provider" {
 }
 
 test "cache read returns error for expired cache" {
-    const cache_dir = "/tmp/nullclaw-test-cache-expired";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    const cache_path = "/tmp/nullclaw-test-cache-expired/models_cache.json";
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const cache_path = try std.fs.path.join(std.testing.allocator, &.{ base, "models_cache.json" });
+    defer std.testing.allocator.free(cache_path);
 
     // Write a cache with old timestamp
     const old_json = "{\"fetched_at\": 1000000, \"myprov\": [\"old-model\"]}";
-    const file = try std.fs.createFileAbsolute(cache_path, .{});
+    const file = try tmp.dir.createFile("models_cache.json", .{});
     defer file.close();
     try file.writeAll(old_json);
 
@@ -1733,8 +1727,16 @@ test "cache read returns error for expired cache" {
 }
 
 test "loadModelsWithCache falls back on fetch failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const nonexistent = try std.fs.path.join(std.testing.allocator, &.{ base, "nonexistent-dir-xyz" });
+    defer std.testing.allocator.free(nonexistent);
+
     // openai without api key will fail fetch, falling back to hardcoded list
-    const models = try loadModelsWithCache(std.testing.allocator, "/tmp/nonexistent-dir-xyz", "openai", null);
+    const models = try loadModelsWithCache(std.testing.allocator, nonexistent, "openai", null);
     defer {
         for (models) |m| std.testing.allocator.free(m);
         std.testing.allocator.free(models);
@@ -1744,14 +1746,13 @@ test "loadModelsWithCache falls back on fetch failure" {
 }
 
 test "loadModelsWithCache returns models for anthropic" {
-    const cache_dir = "/tmp/nullclaw-test-cache-anthropic";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    const models = try loadModelsWithCache(std.testing.allocator, cache_dir, "anthropic", null);
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    const models = try loadModelsWithCache(std.testing.allocator, base, "anthropic", null);
     // Anthropic returns hardcoded models (allocated copies)
     defer {
         for (models) |m| std.testing.allocator.free(m);

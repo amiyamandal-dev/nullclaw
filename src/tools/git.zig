@@ -134,7 +134,7 @@ pub const GitTool = struct {
 
         // Resolve optional cwd override
         const effective_cwd = if (root.getString(args, "cwd")) |cwd| blk: {
-            if (cwd.len == 0 or cwd[0] != '/')
+            if (cwd.len == 0 or !std.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (no allowed_paths configured)");

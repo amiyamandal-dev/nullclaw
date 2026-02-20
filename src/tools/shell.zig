@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -62,7 +63,7 @@ pub const ShellTool = struct {
         // Determine working directory
         const effective_cwd = if (root.getString(args, "cwd")) |cwd| blk: {
             // cwd must be absolute
-            if (cwd.len == 0 or cwd[0] != '/')
+            if (cwd.len == 0 or !std.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (no allowed_paths configured)");
@@ -82,9 +83,9 @@ pub const ShellTool = struct {
             break :blk cwd;
         } else self.workspace_dir;
 
-        // Execute via /bin/sh -c
+        // Execute via platform shell
         var child = std.process.Child.init(
-            &.{ "/bin/sh", "-c", command },
+            &.{ platform.getShell(), platform.getShellFlag(), command },
             allocator,
         );
         child.cwd = effective_cwd;
@@ -96,7 +97,8 @@ pub const ShellTool = struct {
         var env = std.process.EnvMap.init(allocator);
         defer env.deinit();
         for (&SAFE_ENV_VARS) |key| {
-            if (std.posix.getenv(key)) |val| {
+            if (platform.getEnvOrNull(allocator, key)) |val| {
+                defer allocator.free(val);
                 try env.put(key, val);
             }
         }
@@ -212,7 +214,7 @@ test "shell tool schema has command" {
 }
 
 test "shell executes echo" {
-    var st = ShellTool{ .workspace_dir = "/tmp" };
+    var st = ShellTool{ .workspace_dir = "." };
     const t = st.tool();
     const parsed = try root.parseTestArgs("{\"command\": \"echo hello\"}");
     defer parsed.deinit();
@@ -224,7 +226,7 @@ test "shell executes echo" {
 }
 
 test "shell captures failing command" {
-    var st = ShellTool{ .workspace_dir = "/tmp" };
+    var st = ShellTool{ .workspace_dir = "." };
     const t = st.tool();
     const parsed = try root.parseTestArgs("{\"command\": \"ls /nonexistent_dir_xyz_42\"}");
     defer parsed.deinit();
@@ -235,7 +237,7 @@ test "shell captures failing command" {
 }
 
 test "shell missing command param" {
-    var st = ShellTool{ .workspace_dir = "/tmp" };
+    var st = ShellTool{ .workspace_dir = "." };
     const t = st.tool();
     const parsed = try root.parseTestArgs("{}");
     defer parsed.deinit();
@@ -297,6 +299,9 @@ test "shell cwd relative path is rejected" {
 }
 
 test "shell cwd with allowed_paths runs in cwd" {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // pwd not available on Windows
+
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
@@ -308,7 +313,7 @@ test "shell cwd with allowed_paths runs in cwd" {
     const parsed = try root.parseTestArgs(args);
     defer parsed.deinit();
 
-    var st = ShellTool{ .workspace_dir = "/tmp", .allowed_paths = &.{tmp_path} };
+    var st = ShellTool{ .workspace_dir = ".", .allowed_paths = &.{tmp_path} };
     const result = try st.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 
 // Skills — user-defined capabilities loaded from disk.
 //
@@ -266,7 +267,8 @@ pub fn checkRequirements(allocator: std.mem.Allocator, skill: *Skill) void {
 
     // Check required environment variables
     for (skill.requires_env) |env_name| {
-        const val = std.posix.getenv(env_name);
+        const val = platform.getEnvOrNull(allocator, env_name);
+        defer if (val) |v| allocator.free(v);
         if (val == null) {
             if (missing.items.len > 0) missing.append(allocator, ',') catch {};
             missing.append(allocator, ' ') catch {};
@@ -523,8 +525,8 @@ fn readSyncMarker(marker_path: []const u8, buf: []u8) ?i64 {
 
 /// Write a timestamp into the marker file, creating parent directories as needed.
 fn writeSyncMarkerWithTimestamp(allocator: std.mem.Allocator, marker_path: []const u8, timestamp: i64) !void {
-    if (std.mem.lastIndexOfScalar(u8, marker_path, '/')) |sep| {
-        std.fs.makeDirAbsolute(marker_path[0..sep]) catch |err| switch (err) {
+    if (std.fs.path.dirname(marker_path)) |dir| {
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -546,14 +548,15 @@ fn writeSyncMarker(allocator: std.mem.Allocator, marker_path: []const u8) !void 
 /// Gracefully returns without error if git is unavailable or sync is disabled.
 pub fn syncCommunitySkills(allocator: std.mem.Allocator, workspace_dir: []const u8) !void {
     // Check if enabled via env var
-    const enabled_env = std.posix.getenv("NULLCLAW_OPEN_SKILLS_ENABLED");
+    const enabled_env = platform.getEnvOrNull(allocator, "NULLCLAW_OPEN_SKILLS_ENABLED");
+    defer if (enabled_env) |v| allocator.free(v);
     if (enabled_env == null) return; // not set — disabled
     if (std.mem.eql(u8, enabled_env.?, "false")) return;
 
     // Determine community skills directory
     const community_dir = blk: {
-        if (std.posix.getenv("NULLCLAW_OPEN_SKILLS_DIR")) |dir| {
-            break :blk try allocator.dupe(u8, dir);
+        if (platform.getEnvOrNull(allocator, "NULLCLAW_OPEN_SKILLS_DIR")) |dir| {
+            break :blk dir;
         }
         break :blk try std.fmt.allocPrint(allocator, "{s}/skills/community", .{workspace_dir});
     };
@@ -709,7 +712,8 @@ fn countMdFiles(dir_path: []const u8) u32 {
 /// This wraps syncCommunitySkills with additional information about the outcome.
 pub fn syncCommunitySkillsResult(allocator: std.mem.Allocator, workspace_dir: []const u8) !SyncResult {
     // Check if enabled via env var
-    const enabled_env = std.posix.getenv("NULLCLAW_OPEN_SKILLS_ENABLED");
+    const enabled_env = platform.getEnvOrNull(allocator, "NULLCLAW_OPEN_SKILLS_ENABLED");
+    defer if (enabled_env) |v| allocator.free(v);
     if (enabled_env == null) {
         return SyncResult{
             .synced = false,
@@ -727,8 +731,8 @@ pub fn syncCommunitySkillsResult(allocator: std.mem.Allocator, workspace_dir: []
 
     // Determine community skills directory
     const community_dir = blk: {
-        if (std.posix.getenv("NULLCLAW_OPEN_SKILLS_DIR")) |dir| {
-            break :blk try allocator.dupe(u8, dir);
+        if (platform.getEnvOrNull(allocator, "NULLCLAW_OPEN_SKILLS_DIR")) |dir| {
+            break :blk dir;
         }
         break :blk try std.fmt.allocPrint(allocator, "{s}/skills/community", .{workspace_dir});
     };
@@ -926,19 +930,13 @@ test "listSkills from nonexistent directory" {
 
 test "listSkills from empty directory" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-test-skills-empty";
-    const skills_dir = "/tmp/nullclaw-test-skills-empty/skills";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    // Create the skills directory
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try tmp.dir.makePath("skills");
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
     const skills = try listSkills(allocator, base);
     defer freeSkills(allocator, skills);
@@ -947,36 +945,38 @@ test "listSkills from empty directory" {
 
 test "loadSkill reads manifest and instructions" {
     const allocator = std.testing.allocator;
-    const skill_dir = "/tmp/nullclaw-test-skills-load/skills/test-skill";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     // Setup: create skill directory with manifest and instructions
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-load") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-load/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute(skill_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute("/tmp/nullclaw-test-skills-load") catch {};
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "test-skill" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
 
     // Write skill.json
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-load/skills/test-skill/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "test-skill", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"test-skill\", \"version\": \"1.0.0\", \"description\": \"A test\", \"author\": \"tester\"}");
     }
 
     // Write SKILL.md
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-load/skills/test-skill/SKILL.md", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "test-skill", "SKILL.md" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("# Test Skill\nDo the test thing.");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skill_dir = try std.fs.path.join(allocator, &.{ base, "skills", "test-skill" });
+    defer allocator.free(skill_dir);
 
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
@@ -991,28 +991,28 @@ test "loadSkill reads manifest and instructions" {
 
 test "loadSkill without SKILL.md still works" {
     const allocator = std.testing.allocator;
-    const skill_dir = "/tmp/nullclaw-test-skills-nomd/skills/bare-skill";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-nomd") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-nomd/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute(skill_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute("/tmp/nullclaw-test-skills-nomd") catch {};
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "bare-skill" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
 
     // Write only skill.json, no SKILL.md
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-nomd/skills/bare-skill/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "bare-skill", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"bare-skill\", \"version\": \"0.5.0\"}");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skill_dir = try std.fs.path.join(allocator, &.{ base, "skills", "bare-skill" });
+    defer allocator.free(skill_dir);
 
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
@@ -1024,59 +1024,58 @@ test "loadSkill without SKILL.md still works" {
 
 test "loadSkill missing manifest returns error" {
     const allocator = std.testing.allocator;
-    const skill_dir = "/tmp/nullclaw-test-skills-nomanifest";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(skill_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(skill_dir) catch {};
+    const skill_dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(skill_dir);
 
     try std.testing.expectError(error.ManifestNotFound, loadSkill(allocator, skill_dir));
 }
 
 test "listSkills discovers skills in subdirectories" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-test-skills-list";
-    const skills_dir = "/tmp/nullclaw-test-skills-list/skills";
-
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     // Create two skill directories
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-list/skills/alpha") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-list/skills/alpha/skill.json", .{});
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "alpha" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+    {
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "alpha", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"alpha\", \"version\": \"1.0.0\", \"description\": \"First skill\", \"author\": \"dev\"}");
     }
 
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-list/skills/beta") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-list/skills/beta/skill.json", .{});
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "beta" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+    {
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "beta", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"beta\", \"version\": \"2.0.0\", \"description\": \"Second skill\", \"author\": \"dev2\"}");
     }
 
     // Also create a regular file (should be skipped)
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-list/skills/README.md", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "README.md" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("Not a skill directory");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
     const skills = try listSkills(allocator, base);
     defer freeSkills(allocator, skills);
@@ -1096,35 +1095,32 @@ test "listSkills discovers skills in subdirectories" {
 
 test "listSkills skips directories without valid manifest" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-test-skills-skip";
-    const skills_dir = "/tmp/nullclaw-test-skills-skip/skills";
-
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     // One valid skill
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-skip/skills/valid") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-skip/skills/valid/skill.json", .{});
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "valid" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+    {
+        const rel = try std.fs.path.join(allocator, &.{ "skills", "valid", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"valid\"}");
     }
 
     // One empty directory (no manifest)
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-skip/skills/broken") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "skills", "broken" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
     const skills = try listSkills(allocator, base);
     defer freeSkills(allocator, skills);
@@ -1135,33 +1131,35 @@ test "listSkills skips directories without valid manifest" {
 
 test "installSkillFromPath and removeSkill roundtrip" {
     const allocator = std.testing.allocator;
-    const workspace = "/tmp/nullclaw-test-skills-install";
-    const source = "/tmp/nullclaw-test-skills-install-src";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    // Setup workspace
-    std.fs.makeDirAbsolute(workspace) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(workspace) catch {};
+    // Setup workspace and source directories
+    try tmp.dir.makePath("workspace");
+    try tmp.dir.makePath("source");
 
-    // Setup source skill
-    std.fs.makeDirAbsolute(source) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(source) catch {};
-
+    // Write source skill files
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-install-src/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "source", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"installable\", \"version\": \"1.0.0\", \"description\": \"Test install\", \"author\": \"dev\"}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-install-src/SKILL.md", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "source", "SKILL.md" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("# Instructions\nInstall me.");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const workspace = try std.fs.path.join(allocator, &.{ base, "workspace" });
+    defer allocator.free(workspace);
+    const source = try std.fs.path.join(allocator, &.{ base, "source" });
+    defer allocator.free(source);
 
     // Install
     try installSkillFromPath(allocator, source, workspace);
@@ -1184,30 +1182,31 @@ test "installSkillFromPath and removeSkill roundtrip" {
 
 test "installSkillFromPath rejects missing manifest" {
     const allocator = std.testing.allocator;
-    const source = "/tmp/nullclaw-test-skills-install-bad";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(source) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(source) catch {};
+    try tmp.dir.makePath("source");
+    try tmp.dir.makePath("workspace");
 
-    try std.testing.expectError(error.ManifestNotFound, installSkillFromPath(allocator, source, "/tmp/nullclaw-test-ws"));
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const source = try std.fs.path.join(allocator, &.{ base, "source" });
+    defer allocator.free(source);
+    const workspace = try std.fs.path.join(allocator, &.{ base, "workspace" });
+    defer allocator.free(workspace);
+
+    try std.testing.expectError(error.ManifestNotFound, installSkillFromPath(allocator, source, workspace));
 }
 
 test "removeSkill nonexistent returns SkillNotFound" {
     const allocator = std.testing.allocator;
-    const workspace = "/tmp/nullclaw-test-skills-remove-none";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(workspace) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-skills-remove-none/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(workspace) catch {};
+    try tmp.dir.makePath("skills");
+
+    const workspace = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace);
 
     try std.testing.expectError(error.SkillNotFound, removeSkill(allocator, "nonexistent", workspace));
 }
@@ -1222,22 +1221,29 @@ test "removeSkill rejects unsafe names" {
 
 test "installSkillFromPath rejects unsafe skill names" {
     const allocator = std.testing.allocator;
-    const source = "/tmp/nullclaw-test-skills-unsafe-name";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(source) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(source) catch {};
+    try tmp.dir.makePath("source");
+    try tmp.dir.makePath("workspace");
 
     // Write a manifest with a malicious name
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-unsafe-name/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "source", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"../../../etc/passwd\"}");
     }
 
-    try std.testing.expectError(error.UnsafeName, installSkillFromPath(allocator, source, "/tmp/nullclaw-test-ws"));
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const source = try std.fs.path.join(allocator, &.{ base, "source" });
+    defer allocator.free(source);
+    const workspace = try std.fs.path.join(allocator, &.{ base, "workspace" });
+    defer allocator.free(workspace);
+
+    try std.testing.expectError(error.UnsafeName, installSkillFromPath(allocator, source, workspace));
 }
 
 // ── Community Sync Tests ────────────────────────────────────────
@@ -1261,14 +1267,13 @@ test "parseIntField non-numeric value" {
 
 test "sync marker read/write roundtrip" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-test-sync-marker";
-    const marker = "/tmp/nullclaw-test-sync-marker/state/skills_sync.json";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const marker = try std.fs.path.join(allocator, &.{ base, "state", "skills_sync.json" });
+    defer allocator.free(marker);
 
     // Write marker with known timestamp
     try writeSyncMarkerWithTimestamp(allocator, marker, 1700000000);
@@ -1303,30 +1308,38 @@ test "loadCommunitySkills from nonexistent directory" {
 
 test "loadCommunitySkills loads .md files" {
     const allocator = std.testing.allocator;
-    const community_dir = "/tmp/nullclaw-test-community-load";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(community_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(community_dir) catch {};
+    try tmp.dir.makePath("community");
 
     // Create two .md files and one non-.md file
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-community-load/code-review.md", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "community", "code-review.md" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("Review code carefully.");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-community-load/refactor.md", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "community", "refactor.md" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("Refactor for clarity.");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-community-load/README.txt", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "community", "README.txt" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("Not a skill.");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const community_dir = try std.fs.path.join(allocator, &.{ base, "community" });
+    defer allocator.free(community_dir);
 
     const skills = try loadCommunitySkills(allocator, community_dir);
     defer freeSkills(allocator, skills);
@@ -1552,19 +1565,17 @@ test "checkBinaryExists returns false for nonexistent binary" {
 
 test "loadSkill reads always field" {
     const allocator = std.testing.allocator;
-    const skill_dir = "/tmp/nullclaw-test-skills-always";
-
-    std.fs.makeDirAbsolute(skill_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(skill_dir) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-skills-always/skill.json", .{});
+        const f = try tmp.dir.createFile("skill.json", .{});
         defer f.close();
         try f.writeAll("{\"name\": \"always-skill\", \"always\": true, \"requires_bins\": [\"ls\"]}");
     }
+
+    const skill_dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(skill_dir);
 
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
@@ -1577,68 +1588,69 @@ test "loadSkill reads always field" {
 
 test "listSkillsMerged workspace overrides builtin" {
     const allocator = std.testing.allocator;
-    const builtin_base = "/tmp/nullclaw-test-merge-builtin";
-    const ws_base = "/tmp/nullclaw-test-merge-ws";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     // Setup builtin
-    std.fs.makeDirAbsolute(builtin_base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-builtin/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-builtin/skills/shared") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-builtin/skills/builtin-only") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(builtin_base) catch {};
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "builtin", "skills", "shared" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "builtin", "skills", "builtin-only" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
 
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-merge-builtin/skills/shared/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "builtin", "skills", "shared", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"shared\", \"description\": \"builtin version\"}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-merge-builtin/skills/builtin-only/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "builtin", "skills", "builtin-only", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"builtin-only\", \"description\": \"only in builtin\"}");
     }
 
     // Setup workspace
-    std.fs.makeDirAbsolute(ws_base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-ws/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-ws/skills/shared") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-ws/skills/ws-only") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(ws_base) catch {};
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "workspace", "skills", "shared" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "workspace", "skills", "ws-only" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
 
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-merge-ws/skills/shared/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "workspace", "skills", "shared", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"shared\", \"description\": \"workspace version\"}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-merge-ws/skills/ws-only/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "workspace", "skills", "ws-only", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"ws-only\", \"description\": \"only in workspace\"}");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const builtin_base = try std.fs.path.join(allocator, &.{ base, "builtin" });
+    defer allocator.free(builtin_base);
+    const ws_base = try std.fs.path.join(allocator, &.{ base, "workspace" });
+    defer allocator.free(ws_base);
 
     const skills = try listSkillsMerged(allocator, builtin_base, ws_base);
     defer freeSkills(allocator, skills);
@@ -1706,36 +1718,33 @@ test "checkRequirements detects both missing bin and env" {
 
 test "listSkillsMerged runs checkRequirements" {
     const allocator = std.testing.allocator;
-    const builtin_base = "/tmp/nullclaw-test-merge-checkreq";
-    const ws_base = "/tmp/nullclaw-test-merge-checkreq-ws";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
     // Setup builtin with a skill that requires a nonexistent binary
-    std.fs.makeDirAbsolute(builtin_base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-checkreq/skills") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-test-merge-checkreq/skills/needy") catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(builtin_base) catch {};
+    {
+        const sub = try std.fs.path.join(allocator, &.{ "builtin", "skills", "needy" });
+        defer allocator.free(sub);
+        try tmp.dir.makePath(sub);
+    }
 
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-test-merge-checkreq/skills/needy/skill.json", .{});
+        const rel = try std.fs.path.join(allocator, &.{ "builtin", "skills", "needy", "skill.json" });
+        defer allocator.free(rel);
+        const f = try tmp.dir.createFile(rel, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"needy\", \"description\": \"needs stuff\", \"requires_bins\": [\"nullclaw_fake_bin_zzz\"]}");
     }
 
     // Empty workspace
-    std.fs.makeDirAbsolute(ws_base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(ws_base) catch {};
+    try tmp.dir.makePath("workspace");
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const builtin_base = try std.fs.path.join(allocator, &.{ base, "builtin" });
+    defer allocator.free(builtin_base);
+    const ws_base = try std.fs.path.join(allocator, &.{ base, "workspace" });
+    defer allocator.free(ws_base);
 
     const skills = try listSkillsMerged(allocator, builtin_base, ws_base);
     defer freeSkills(allocator, skills);
@@ -1780,19 +1789,22 @@ test "countMdFiles returns zero for nonexistent dir" {
 }
 
 test "countMdFiles counts only .md files" {
-    const dir = "/tmp/nullclaw-test-countmd";
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    try tmp.dir.makePath("countmd");
 
     // Create 3 .md files and 2 non-.md files
     inline for (.{ "a.md", "b.md", "c.md", "readme.txt", "data.json" }) |name| {
-        const f = try std.fs.createFileAbsolute(dir ++ "/" ++ name, .{});
+        const f = try tmp.dir.createFile("countmd" ++ std.fs.path.sep_str ++ name, .{});
         f.close();
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const dir = try std.fs.path.join(allocator, &.{ base, "countmd" });
+    defer allocator.free(dir);
 
     const count = countMdFiles(dir);
     try std.testing.expectEqual(@as(u32, 3), count);

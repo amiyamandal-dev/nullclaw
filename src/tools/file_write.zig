@@ -52,7 +52,7 @@ pub const FileWriteTool = struct {
             return ToolResult.fail("Missing 'content' parameter");
 
         // Build full path — absolute or relative
-        const full_path = if (path.len > 0 and path[0] == '/') blk: {
+        const full_path = if (std.fs.path.isAbsolute(path)) blk: {
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("Absolute paths not allowed (no allowed_paths configured)");
             if (std.mem.indexOfScalar(u8, path, 0) != null)

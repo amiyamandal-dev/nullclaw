@@ -7,8 +7,8 @@ const JsonObjectMap = root.JsonObjectMap;
 /// Default maximum file size to read for editing (10MB).
 const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
-/// System-critical prefixes — always blocked even if they match allowed_paths.
-pub const SYSTEM_BLOCKED_PREFIXES = [_][]const u8{
+/// System-critical prefixes (Unix) — always blocked even if they match allowed_paths.
+const SYSTEM_BLOCKED_PREFIXES_UNIX = [_][]const u8{
     "/System",
     "/Library",
     "/bin",
@@ -26,10 +26,28 @@ pub const SYSTEM_BLOCKED_PREFIXES = [_][]const u8{
     "/sys",
 };
 
-/// Check whether a directory-style prefix matches (exact or followed by '/').
+/// System-critical prefixes (Windows).
+const SYSTEM_BLOCKED_PREFIXES_WINDOWS = [_][]const u8{
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+    "C:\\System32",
+    "C:\\Recovery",
+};
+
+/// Platform-selected system blocked prefixes.
+pub const SYSTEM_BLOCKED_PREFIXES: []const []const u8 = if (@import("builtin").os.tag == .windows)
+    &SYSTEM_BLOCKED_PREFIXES_WINDOWS
+else
+    &SYSTEM_BLOCKED_PREFIXES_UNIX;
+
+/// Check whether a directory-style prefix matches (exact or followed by a path separator).
 fn pathStartsWith(path: []const u8, prefix: []const u8) bool {
     if (!std.mem.startsWith(u8, path, prefix)) return false;
-    return path.len == prefix.len or path[prefix.len] == '/';
+    if (path.len == prefix.len) return true;
+    const c = path[prefix.len];
+    return c == '/' or c == '\\';
 }
 
 /// Check whether a **resolved** absolute path is allowed by the policy:
@@ -43,7 +61,7 @@ pub fn isResolvedPathAllowed(
     allowed_paths: []const []const u8,
 ) bool {
     // 1. System blocklist
-    for (&SYSTEM_BLOCKED_PREFIXES) |prefix| {
+    for (SYSTEM_BLOCKED_PREFIXES) |prefix| {
         if (pathStartsWith(resolved, prefix)) return false;
     }
     // 2. Workspace
@@ -107,7 +125,7 @@ pub const FileEditTool = struct {
             return ToolResult.fail("Missing 'new_text' parameter");
 
         // Build full path — absolute or relative
-        const full_path = if (path.len > 0 and path[0] == '/') blk: {
+        const full_path = if (std.fs.path.isAbsolute(path)) blk: {
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("Absolute paths not allowed (no allowed_paths configured)");
             if (std.mem.indexOfScalar(u8, path, 0) != null)
@@ -183,9 +201,9 @@ pub const FileEditTool = struct {
 
 /// Check if a relative path is safe (no traversal, no absolute path).
 pub fn isPathSafe(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return false;
+    if (std.fs.path.isAbsolute(path)) return false;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
-    var iter = std.mem.splitScalar(u8, path, '/');
+    var iter = std.mem.splitAny(u8, path, "/\\");
     while (iter.next()) |component| {
         if (std.mem.eql(u8, component, "..")) return false;
     }
@@ -398,24 +416,40 @@ test "isResolvedPathAllowed rejects partial prefix match" {
 }
 
 test "isResolvedPathAllowed blocks system paths" {
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/etc/passwd",
-        "/etc",
-        &.{},
-    ));
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/System/Library/something",
-        "/home/ws",
-        &.{"/System"},
-    ));
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/bin/sh",
-        "/home/ws",
-        &.{"/bin"},
-    ));
+    if (comptime @import("builtin").os.tag == .windows) {
+        // Windows uses its own SYSTEM_BLOCKED_PREFIXES (C:\Windows, etc.)
+        try std.testing.expect(!isResolvedPathAllowed(
+            std.testing.allocator,
+            "C:\\Windows\\system32\\cmd.exe",
+            "C:\\Users\\ws",
+            &.{},
+        ));
+        try std.testing.expect(!isResolvedPathAllowed(
+            std.testing.allocator,
+            "C:\\Program Files\\app\\evil.exe",
+            "C:\\Users\\ws",
+            &.{},
+        ));
+    } else {
+        try std.testing.expect(!isResolvedPathAllowed(
+            std.testing.allocator,
+            "/etc/passwd",
+            "/etc",
+            &.{},
+        ));
+        try std.testing.expect(!isResolvedPathAllowed(
+            std.testing.allocator,
+            "/System/Library/something",
+            "/home/ws",
+            &.{"/System"},
+        ));
+        try std.testing.expect(!isResolvedPathAllowed(
+            std.testing.allocator,
+            "/bin/sh",
+            "/home/ws",
+            &.{"/bin"},
+        ));
+    }
 }
 
 test "isResolvedPathAllowed allows via allowed_paths" {
@@ -470,9 +504,21 @@ test "file_edit absolute path with allowed_paths works" {
     const abs_file = try std.fs.path.join(std.testing.allocator, &.{ ws_path, "test.txt" });
     defer std.testing.allocator.free(abs_file);
 
+    // JSON-escape backslashes in the path (needed on Windows where paths use \)
+    var escaped_buf: [1024]u8 = undefined;
+    var esc_len: usize = 0;
+    for (abs_file) |c| {
+        if (c == '\\') {
+            escaped_buf[esc_len] = '\\';
+            esc_len += 1;
+        }
+        escaped_buf[esc_len] = c;
+        esc_len += 1;
+    }
+
     // Use a different workspace but allow tmp_dir via allowed_paths
-    var args_buf: [512]u8 = undefined;
-    const args = try std.fmt.bufPrint(&args_buf, "{{\"path\": \"{s}\", \"old_text\": \"world\", \"new_text\": \"zig\"}}", .{abs_file});
+    var args_buf: [2048]u8 = undefined;
+    const args = try std.fmt.bufPrint(&args_buf, "{{\"path\": \"{s}\", \"old_text\": \"world\", \"new_text\": \"zig\"}}", .{escaped_buf[0..esc_len]});
     const parsed = try root.parseTestArgs(args);
     defer parsed.deinit();
 
