@@ -49,6 +49,7 @@ pub const ProviderHolder = union(enum) {
     openai: providers.openai.OpenAiProvider,
     gemini: providers.gemini.GeminiProvider,
     ollama: providers.ollama.OllamaProvider,
+    compatible: providers.compatible.OpenAiCompatibleProvider,
 
     pub fn provider(self: *ProviderHolder) providers.Provider {
         return switch (self.*) {
@@ -57,6 +58,7 @@ pub const ProviderHolder = union(enum) {
             .openai => |*p| p.provider(),
             .gemini => |*p| p.provider(),
             .ollama => |*p| p.provider(),
+            .compatible => |*p| p.provider(),
         };
     }
 };
@@ -80,17 +82,32 @@ pub const ChannelRuntime = struct {
         errdefer allocator.destroy(holder);
 
         const api_key = config.defaultProviderKey();
-        holder.* = if (std.mem.eql(u8, config.default_provider, "anthropic"))
-            .{ .anthropic = providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
-        else if (std.mem.eql(u8, config.default_provider, "openai"))
-            .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "gemini") or
-            std.mem.eql(u8, config.default_provider, "google"))
-            .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "ollama"))
-            .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) }
-        else
-            .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+        const kind = providers.classifyProvider(config.default_provider);
+        holder.* = switch (kind) {
+            .anthropic_provider => .{ .anthropic = providers.anthropic.AnthropicProvider.init(
+                allocator,
+                api_key,
+                if (std.mem.startsWith(u8, config.default_provider, "anthropic-custom:"))
+                    config.default_provider["anthropic-custom:".len..]
+                else
+                    null,
+            ) },
+            .openai_provider => .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) },
+            .gemini_provider => .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) },
+            .ollama_provider => .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) },
+            .openrouter_provider => .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) },
+            .compatible_provider => .{ .compatible = providers.compatible.OpenAiCompatibleProvider.init(
+                allocator,
+                config.default_provider,
+                if (std.mem.startsWith(u8, config.default_provider, "custom:"))
+                    config.default_provider["custom:".len..]
+                else
+                    providers.compatibleProviderUrl(config.default_provider) orelse "https://openrouter.ai/api/v1",
+                api_key,
+                .bearer,
+            ) },
+            .claude_cli_provider, .codex_cli_provider, .unknown => .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) },
+        };
 
         const provider_i = holder.provider();
 
@@ -312,4 +329,5 @@ test "ProviderHolder tagged union fields" {
     try std.testing.expect(@hasField(ProviderHolder, "openai"));
     try std.testing.expect(@hasField(ProviderHolder, "gemini"));
     try std.testing.expect(@hasField(ProviderHolder, "ollama"));
+    try std.testing.expect(@hasField(ProviderHolder, "compatible"));
 }
