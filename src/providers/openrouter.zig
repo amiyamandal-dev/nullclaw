@@ -39,15 +39,30 @@ pub const OpenRouterProvider = struct {
         model: []const u8,
         temperature: f64,
     ) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(allocator);
+
+        try buf.appendSlice(allocator, "{\"model\":\"");
+        try buf.appendSlice(allocator, model);
+        try buf.appendSlice(allocator, "\",\"messages\":[");
+
         if (system_prompt) |sys| {
-            return std.fmt.allocPrint(allocator,
-                \\{{"model":"{s}","messages":[{{"role":"system","content":"{s}"}},{{"role":"user","content":"{s}"}}],"temperature":{d:.2}}}
-            , .{ model, sys, message, temperature });
+            try buf.appendSlice(allocator, "{\"role\":\"system\",\"content\":");
+            try root.appendJsonString(&buf, allocator, sys);
+            try buf.appendSlice(allocator, "},{\"role\":\"user\",\"content\":");
+            try root.appendJsonString(&buf, allocator, message);
+            try buf.append(allocator, '}');
         } else {
-            return std.fmt.allocPrint(allocator,
-                \\{{"model":"{s}","messages":[{{"role":"user","content":"{s}"}}],"temperature":{d:.2}}}
-            , .{ model, message, temperature });
+            try buf.appendSlice(allocator, "{\"role\":\"user\",\"content\":");
+            try root.appendJsonString(&buf, allocator, message);
+            try buf.append(allocator, '}');
         }
+
+        try buf.append(allocator, ']');
+        try root.appendGenerationFields(&buf, allocator, model, temperature, null, null);
+        try buf.append(allocator, '}');
+
+        return try buf.toOwnedSlice(allocator);
     }
 
     /// Parse text content from an OpenRouter response (OpenAI-compatible format).
@@ -362,15 +377,8 @@ pub const OpenRouterProvider = struct {
             try buf.append(allocator, '}');
         }
 
-        try buf.appendSlice(allocator, "],\"temperature\":");
-        var temp_buf: [16]u8 = undefined;
-        const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.OpenRouterApiError;
-        try buf.appendSlice(allocator, temp_str);
-
-        try buf.appendSlice(allocator, ",\"max_tokens\":");
-        var max_buf: [16]u8 = undefined;
-        const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{request.max_tokens}) catch return error.OpenRouterApiError;
-        try buf.appendSlice(allocator, max_str);
+        try buf.append(allocator, ']');
+        try root.appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens, request.reasoning_effort);
 
         if (request.tools) |tools| {
             if (tools.len > 0) {
@@ -573,6 +581,30 @@ test "convertTools with empty tools returns empty array" {
 test "warmup does not crash without key" {
     var p = OpenRouterProvider.init(std.testing.allocator, null);
     p.warmup(); // Should return immediately, no crash
+}
+
+test "buildRequestBody reasoning model omits temperature" {
+    const body = try OpenRouterProvider.buildRequestBody(std.testing.allocator, null, "hello", "o3-mini", 0.5);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+}
+
+test "buildChatRequestBody o3 uses max_completion_tokens" {
+    const msgs = [_]ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = ChatRequest{
+        .messages = &msgs,
+        .model = "o3",
+        .temperature = 0.7,
+        .max_tokens = 100,
+    };
+    const body = try OpenRouterProvider.buildChatRequestBody(std.testing.allocator, req, "o3", 0.7);
+    defer std.testing.allocator.free(body);
+    // Reasoning model: no temperature, uses max_completion_tokens
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") == null);
 }
 
 test "chatWithHistory fails without key" {

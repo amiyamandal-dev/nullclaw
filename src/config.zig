@@ -68,6 +68,7 @@ pub const Config = struct {
     default_provider: []const u8 = "openrouter",
     default_model: ?[]const u8 = "anthropic/claude-sonnet-4",
     default_temperature: f64 = 0.7,
+    reasoning_effort: ?[]const u8 = null,
 
     // Model routing and delegate agents
     model_routes: []const ModelRouteConfig = &.{},
@@ -101,7 +102,7 @@ pub const Config = struct {
     // Convenience aliases for backward-compat flat access used by other modules.
     // These are set during load() to mirror nested values.
     temperature: f64 = 0.7,
-    max_tokens: u32 = 4096,
+    max_tokens: ?u32 = null,
     memory_backend: []const u8 = "sqlite",
     memory_auto_save: bool = true,
     heartbeat_enabled: bool = false,
@@ -1461,6 +1462,49 @@ test "parse imessage config" {
     try std.testing.expectEqual(@as(usize, 1), ic.allow_from.len);
     for (ic.allow_from) |u| allocator.free(u);
     allocator.free(ic.allow_from);
+}
+
+test "json parse reasoning_effort" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"reasoning_effort": "high"}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("high", cfg.reasoning_effort.?);
+    allocator.free(cfg.reasoning_effort.?);
+}
+
+test "json parse invalid reasoning_effort ignored" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"reasoning_effort": "invalid"}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expect(cfg.reasoning_effort == null);
+}
+
+test "json parse reasoning_effort medium" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"reasoning_effort": "medium"}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("medium", cfg.reasoning_effort.?);
+    allocator.free(cfg.reasoning_effort.?);
+}
+
+test "json parse reasoning_effort low" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"reasoning_effort": "low"}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("low", cfg.reasoning_effort.?);
+    allocator.free(cfg.reasoning_effort.?);
 }
 
 test "unknown openclaw fields silently ignored" {

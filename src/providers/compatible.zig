@@ -249,15 +249,30 @@ pub const OpenAiCompatibleProvider = struct {
         model: []const u8,
         temperature: f64,
     ) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(allocator);
+
+        try buf.appendSlice(allocator, "{\"model\":\"");
+        try buf.appendSlice(allocator, model);
+        try buf.appendSlice(allocator, "\",\"messages\":[");
+
         if (system_prompt) |sys| {
-            return std.fmt.allocPrint(allocator,
-                \\{{"model":"{s}","messages":[{{"role":"system","content":"{s}"}},{{"role":"user","content":"{s}"}}],"temperature":{d:.2},"stream":false}}
-            , .{ model, sys, message, temperature });
+            try buf.appendSlice(allocator, "{\"role\":\"system\",\"content\":");
+            try root.appendJsonString(&buf, allocator, sys);
+            try buf.appendSlice(allocator, "},{\"role\":\"user\",\"content\":");
+            try root.appendJsonString(&buf, allocator, message);
+            try buf.append(allocator, '}');
         } else {
-            return std.fmt.allocPrint(allocator,
-                \\{{"model":"{s}","messages":[{{"role":"user","content":"{s}"}}],"temperature":{d:.2},"stream":false}}
-            , .{ model, message, temperature });
+            try buf.appendSlice(allocator, "{\"role\":\"user\",\"content\":");
+            try root.appendJsonString(&buf, allocator, message);
+            try buf.append(allocator, '}');
         }
+
+        try buf.append(allocator, ']');
+        try root.appendGenerationFields(&buf, allocator, model, temperature, null, null);
+        try buf.appendSlice(allocator, ",\"stream\":false}");
+
+        return try buf.toOwnedSlice(allocator);
     }
 
     /// Build the authorization header value.
@@ -574,10 +589,8 @@ fn buildChatRequestBody(
         try buf.append(allocator, '}');
     }
 
-    try buf.appendSlice(allocator, "],\"temperature\":");
-    var temp_buf: [16]u8 = undefined;
-    const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.CompatibleApiError;
-    try buf.appendSlice(allocator, temp_str);
+    try buf.append(allocator, ']');
+    try root.appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens, request.reasoning_effort);
     if (request.tools) |tools| {
         if (tools.len > 0) {
             try buf.appendSlice(allocator, ",\"tools\":");
@@ -618,10 +631,8 @@ fn buildStreamingChatRequestBody(
         try buf.append(allocator, '}');
     }
 
-    try buf.appendSlice(allocator, "],\"temperature\":");
-    var temp_buf: [16]u8 = undefined;
-    const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.CompatibleApiError;
-    try buf.appendSlice(allocator, temp_str);
+    try buf.append(allocator, ']');
+    try root.appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens, request.reasoning_effort);
     if (request.tools) |tools| {
         if (tools.len > 0) {
             try buf.appendSlice(allocator, ",\"tools\":");
@@ -1106,4 +1117,48 @@ test "buildChatRequestBody with high detail image_url" {
     const content = messages.items[0].object.get("content").?.array;
     const img_url_obj = content.items[0].object.get("image_url").?.object;
     try std.testing.expectEqualStrings("high", img_url_obj.get("detail").?.string);
+}
+
+test "buildRequestBody reasoning model omits temperature" {
+    const body = try OpenAiCompatibleProvider.buildRequestBody(std.testing.allocator, null, "hello", "gpt-5", 0.5);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
+}
+
+test "buildChatRequestBody o1 omits temperature" {
+    const allocator = std.testing.allocator;
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "o1",
+        .temperature = 0.7,
+        .max_tokens = 100,
+    };
+
+    const body = try buildChatRequestBody(allocator, req, "o1", 0.7);
+    defer allocator.free(body);
+
+    // Reasoning model: no temperature, uses max_completion_tokens
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") == null);
+}
+
+test "buildStreamingChatRequestBody reasoning model omits temperature" {
+    const allocator = std.testing.allocator;
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "gpt-5.2",
+        .temperature = 0.5,
+        .max_tokens = 200,
+    };
+
+    const body = try buildStreamingChatRequestBody(allocator, req, "gpt-5.2", 0.5);
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
 }

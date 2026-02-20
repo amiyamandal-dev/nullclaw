@@ -56,7 +56,7 @@ pub const OpenAiProvider = struct {
         }
 
         try buf.append(allocator, ']');
-        try appendGenerationFields(&buf, allocator, model, temperature, null);
+        try root.appendGenerationFields(&buf, allocator, model, temperature, null, null);
         try buf.append(allocator, '}');
         return try buf.toOwnedSlice(allocator);
     }
@@ -249,43 +249,6 @@ pub const OpenAiProvider = struct {
 
     fn deinitImpl(_: *anyopaque) void {}
 
-    fn isGpt5Model(model: []const u8) bool {
-        return std.mem.startsWith(u8, model, "gpt-5");
-    }
-
-    /// Append model-specific generation controls:
-    /// - non-gpt-5: `temperature` + optional `max_tokens`
-    /// - gpt-5*: optional `max_completion_tokens` only
-    fn appendGenerationFields(
-        buf: *std.ArrayListUnmanaged(u8),
-        allocator: std.mem.Allocator,
-        model: []const u8,
-        temperature: f64,
-        max_tokens: ?u32,
-    ) !void {
-        if (!isGpt5Model(model)) {
-            try buf.appendSlice(allocator, ",\"temperature\":");
-            var temp_buf: [16]u8 = undefined;
-            const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.OpenAiApiError;
-            try buf.appendSlice(allocator, temp_str);
-
-            if (max_tokens) |max_tok| {
-                try buf.appendSlice(allocator, ",\"max_tokens\":");
-                var max_buf: [16]u8 = undefined;
-                const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_tok}) catch return error.OpenAiApiError;
-                try buf.appendSlice(allocator, max_str);
-            }
-            return;
-        }
-
-        if (max_tokens) |max_tok| {
-            try buf.appendSlice(allocator, ",\"max_completion_tokens\":");
-            var max_buf: [16]u8 = undefined;
-            const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_tok}) catch return error.OpenAiApiError;
-            try buf.appendSlice(allocator, max_str);
-        }
-    }
-
     /// Build a streaming chat request JSON body (same as buildChatRequestBody but with "stream":true).
     fn buildStreamingChatRequestBody(
         allocator: std.mem.Allocator,
@@ -314,7 +277,7 @@ pub const OpenAiProvider = struct {
         }
 
         try buf.append(allocator, ']');
-        try appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens);
+        try root.appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens, request.reasoning_effort);
 
         if (request.tools) |tools| {
             if (tools.len > 0) {
@@ -356,7 +319,7 @@ pub const OpenAiProvider = struct {
         }
 
         try buf.append(allocator, ']');
-        try appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens);
+        try root.appendGenerationFields(&buf, allocator, model, temperature, request.max_tokens, request.reasoning_effort);
 
         if (request.tools) |tools| {
             if (tools.len > 0) {
@@ -390,7 +353,7 @@ test "buildRequestBody with system" {
     try std.testing.expect(std.mem.indexOf(u8, body, "You are helpful") != null);
 }
 
-test "buildRequestBody gpt-5 omits temperature" {
+test "buildRequestBody reasoning model omits temperature" {
     const body = try OpenAiProvider.buildRequestBody(std.testing.allocator, null, "hello", "gpt-5.2", 0.1);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
@@ -513,7 +476,7 @@ test "buildRequestBody includes temperature zero" {
     try std.testing.expect(std.mem.indexOf(u8, body, "0.00") != null);
 }
 
-test "buildChatRequestBody gpt-5 uses max_completion_tokens" {
+test "buildChatRequestBody reasoning model uses max_completion_tokens" {
     const msgs = [_]root.ChatMessage{
         .{ .role = .user, .content = "hello" },
     };
@@ -530,7 +493,7 @@ test "buildChatRequestBody gpt-5 uses max_completion_tokens" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
 }
 
-test "buildStreamingChatRequestBody gpt-5 uses max_completion_tokens" {
+test "buildStreamingChatRequestBody reasoning model uses max_completion_tokens" {
     const msgs = [_]root.ChatMessage{
         .{ .role = .user, .content = "hello" },
     };
@@ -552,4 +515,166 @@ test "provider getName returns OpenAI" {
     var p = OpenAiProvider.init(std.testing.allocator, "key");
     const prov = p.provider();
     try std.testing.expectEqualStrings("OpenAI", prov.getName());
+}
+
+test "isReasoningModel detects all reasoning prefixes" {
+    try std.testing.expect(root.isReasoningModel("gpt-5"));
+    try std.testing.expect(root.isReasoningModel("gpt-5.1"));
+    try std.testing.expect(root.isReasoningModel("gpt-5.2-turbo"));
+    try std.testing.expect(root.isReasoningModel("o1"));
+    try std.testing.expect(root.isReasoningModel("o1-mini"));
+    try std.testing.expect(root.isReasoningModel("o1-preview"));
+    try std.testing.expect(root.isReasoningModel("o3"));
+    try std.testing.expect(root.isReasoningModel("o3-mini"));
+    try std.testing.expect(root.isReasoningModel("o4-mini"));
+    try std.testing.expect(root.isReasoningModel("o4-mini-2025"));
+    try std.testing.expect(root.isReasoningModel("codex-mini"));
+    try std.testing.expect(root.isReasoningModel("codex-mini-latest"));
+    // Non-reasoning models
+    try std.testing.expect(!root.isReasoningModel("gpt-4o"));
+    try std.testing.expect(!root.isReasoningModel("gpt-4-turbo"));
+    try std.testing.expect(!root.isReasoningModel("gpt-4o-mini"));
+    try std.testing.expect(!root.isReasoningModel("claude-sonnet-4"));
+}
+
+test "o3-mini omits temperature" {
+    const body = try OpenAiProvider.buildRequestBody(std.testing.allocator, null, "hello", "o3-mini", 0.5);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+}
+
+test "buildChatRequestBody without max_tokens omits it" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hi" },
+    };
+    const req = root.ChatRequest{ .messages = &msgs, .model = "gpt-4o", .temperature = 0.7 };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "gpt-4o", 0.7);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") != null);
+}
+
+test "o1 uses max_completion_tokens" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "o1",
+        .temperature = 0.7,
+        .max_tokens = 100,
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "o1", 0.7);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+}
+
+test "reasoning model with reasoning_effort=none includes temperature" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "gpt-5.1",
+        .temperature = 0.3,
+        .max_tokens = 200,
+        .reasoning_effort = "none",
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "gpt-5.1", 0.3);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":0.30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"none\"") != null);
+}
+
+test "reasoning_effort emitted in request body" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "o3-mini",
+        .temperature = 0.7,
+        .max_tokens = 50,
+        .reasoning_effort = "high",
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "o3-mini", 0.7);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"high\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":50") != null);
+}
+
+test "o4-mini omits temperature in streaming request" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "o4-mini",
+        .temperature = 0.7,
+        .max_tokens = 80,
+    };
+    const body = try OpenAiProvider.buildStreamingChatRequestBody(std.testing.allocator, req, "o4-mini", 0.7);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
+}
+
+test "codex-mini uses max_completion_tokens" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "codex-mini-latest",
+        .temperature = 0.5,
+        .max_tokens = 60,
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "codex-mini-latest", 0.5);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":60") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+}
+
+test "reasoning_effort on non-reasoning model is not emitted" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "gpt-4o",
+        .temperature = 0.7,
+        .max_tokens = 100,
+        .reasoning_effort = "high",
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "gpt-4o", 0.7);
+    defer std.testing.allocator.free(body);
+    // Non-reasoning model: reasoning_effort should NOT appear
+    try std.testing.expect(std.mem.indexOf(u8, body, "reasoning_effort") == null);
+    // Should still have temperature
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") != null);
+}
+
+test "reasoning_effort medium omits temperature" {
+    const msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+    const req = root.ChatRequest{
+        .messages = &msgs,
+        .model = "o3-mini",
+        .temperature = 0.5,
+        .max_tokens = 50,
+        .reasoning_effort = "medium",
+    };
+    const body = try OpenAiProvider.buildChatRequestBody(std.testing.allocator, req, "o3-mini", 0.5);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"medium\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_completion_tokens\":50") != null);
 }

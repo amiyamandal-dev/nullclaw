@@ -207,10 +207,12 @@ pub const ChatRequest = struct {
     messages: []const ChatMessage,
     model: []const u8 = "",
     temperature: f64 = 0.7,
-    max_tokens: u32 = 4096,
+    max_tokens: ?u32 = null,
     tools: ?[]const ToolSpec = null,
     /// Max seconds to wait for the HTTP response (curl --max-time). 0 = no limit.
     timeout_secs: u64 = 0,
+    /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
+    reasoning_effort: ?[]const u8 = null,
 };
 
 /// A single tool result message in a conversation.
@@ -891,7 +893,7 @@ pub fn complete(allocator: std.mem.Allocator, cfg: anytype, prompt: []const u8) 
     const api_key = resolveApiKeyFromCfg(cfg) orelse return error.NoApiKey;
     const url = providerUrl(cfg.default_provider);
     const model = cfg.default_model orelse "anthropic/claude-sonnet-4-5-20250929";
-    const body_str = try buildRequestBody(allocator, model, prompt, cfg.temperature, cfg.max_tokens);
+    const body_str = try buildRequestBody(allocator, model, prompt, cfg.temperature, cfg.max_tokens orelse 4096);
     defer allocator.free(body_str);
 
     const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
@@ -993,6 +995,69 @@ pub fn buildRequestBodyWithSystem(allocator: std.mem.Allocator, model: []const u
     try json_util.appendJsonString(&buf, allocator, prompt);
     try std.fmt.format(w, "}}],\"temperature\":{d:.1},\"max_tokens\":{d}}}", .{ temperature, max_tokens });
     return try buf.toOwnedSlice(allocator);
+}
+
+/// Check if a model name indicates an OpenAI reasoning model
+/// (o1, o3, o4-mini, gpt-5*, codex-mini).
+pub fn isReasoningModel(model: []const u8) bool {
+    return std.mem.startsWith(u8, model, "gpt-5") or
+        std.mem.startsWith(u8, model, "o1") or
+        std.mem.startsWith(u8, model, "o3") or
+        std.mem.startsWith(u8, model, "o4-mini") or
+        std.mem.startsWith(u8, model, "codex-mini");
+}
+
+/// Append model-specific generation controls to a JSON request body buffer:
+/// - non-reasoning: `temperature` + optional `max_tokens`
+/// - reasoning + reasoning_effort=="none": `temperature` + `max_completion_tokens`
+/// - reasoning (otherwise): `max_completion_tokens` only (no temperature)
+/// Always emits `reasoning_effort` when set on a reasoning model.
+pub fn appendGenerationFields(
+    buf: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    model: []const u8,
+    temperature: f64,
+    max_tokens: ?u32,
+    reasoning_effort: ?[]const u8,
+) !void {
+    if (!isReasoningModel(model)) {
+        // Non-reasoning model: temperature + max_tokens
+        try buf.appendSlice(allocator, ",\"temperature\":");
+        var temp_buf: [16]u8 = undefined;
+        const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.FormatError;
+        try buf.appendSlice(allocator, temp_str);
+
+        if (max_tokens) |max_tok| {
+            try buf.appendSlice(allocator, ",\"max_tokens\":");
+            var max_buf: [16]u8 = undefined;
+            const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_tok}) catch return error.FormatError;
+            try buf.appendSlice(allocator, max_str);
+        }
+        return;
+    }
+
+    // Reasoning model: temperature only if reasoning_effort == "none"
+    const effort_is_none = if (reasoning_effort) |re| std.mem.eql(u8, re, "none") else false;
+    if (effort_is_none) {
+        try buf.appendSlice(allocator, ",\"temperature\":");
+        var temp_buf: [16]u8 = undefined;
+        const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{temperature}) catch return error.FormatError;
+        try buf.appendSlice(allocator, temp_str);
+    }
+
+    // Reasoning model: always use max_completion_tokens instead of max_tokens
+    if (max_tokens) |max_tok| {
+        try buf.appendSlice(allocator, ",\"max_completion_tokens\":");
+        var max_buf: [16]u8 = undefined;
+        const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_tok}) catch return error.FormatError;
+        try buf.appendSlice(allocator, max_str);
+    }
+
+    // Emit reasoning_effort when set (JSON-escaped for safety)
+    if (reasoning_effort) |re| {
+        try buf.appendSlice(allocator, ",\"reasoning_effort\":");
+        try json_util.appendJsonString(buf, allocator, re);
+    }
 }
 
 /// Re-export shared JSON string utility (used by sub-modules via `root.appendJsonString`).

@@ -38,6 +38,17 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("max_tokens")) |v| {
         if (v == .integer) self.max_tokens = @intCast(v.integer);
     }
+    if (root.get("reasoning_effort")) |v| {
+        if (v == .string) {
+            if (std.mem.eql(u8, v.string, "low") or
+                std.mem.eql(u8, v.string, "medium") or
+                std.mem.eql(u8, v.string, "high") or
+                std.mem.eql(u8, v.string, "none"))
+            {
+                self.reasoning_effort = try self.allocator.dupe(u8, v.string);
+            }
+        }
+    }
 
     // Model routes
     if (root.get("model_routes")) |v| {
