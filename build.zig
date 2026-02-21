@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.20";
+    const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.21";
 
     const sqlite3_dep = b.dependency("sqlite3", .{
         .target = target,
@@ -54,7 +54,9 @@ pub fn build(b: *std.Build) void {
 
     // macOS: strip local symbols post-install (Zig strip only removes debug info)
     if (optimize != .Debug and builtin.os.tag == .macos) {
-        const strip_cmd = b.addSystemCommand(&.{ "strip", "-x", "zig-out/bin/nullclaw" });
+        const strip_cmd = b.addSystemCommand(&.{"strip"});
+        strip_cmd.addArgs(&.{"-x"});
+        strip_cmd.addFileArg(exe.getEmittedBin());
         strip_cmd.step.dependOn(b.getInstallStep());
         b.default_step = &strip_cmd.step;
     }
