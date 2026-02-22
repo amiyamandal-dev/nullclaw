@@ -154,7 +154,7 @@ pub fn runTelegramLoop(
     // Heap-alloc TelegramChannel for vtable pointer stability
     const tg_ptr = allocator.create(telegram.TelegramChannel) catch return;
     defer allocator.destroy(tg_ptr);
-    tg_ptr.* = telegram.TelegramChannel.init(allocator, telegram_config.bot_token, telegram_config.allow_from);
+    tg_ptr.* = telegram.TelegramChannel.init(allocator, telegram_config.bot_token, telegram_config.allow_from, telegram_config.group_allow_from, telegram_config.group_policy);
     tg_ptr.proxy = telegram_config.proxy;
 
     // Set up transcription — key comes from providers.{audio_media.provider}

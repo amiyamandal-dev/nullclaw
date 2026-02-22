@@ -831,8 +831,8 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (acc.get("allow_bots")) |v| {
                                 if (v == .bool) dc.allow_bots = v.bool;
                             }
-                            if (acc.get("mention_only")) |v| {
-                                if (v == .bool) dc.mention_only = v.bool;
+                            if (acc.get("require_mention")) |v| {
+                                if (v == .bool) dc.require_mention = v.bool;
                             }
                             if (acc.get("intents")) |v| {
                                 if (v == .integer) dc.intents = @intCast(v.integer);

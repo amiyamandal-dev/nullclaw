@@ -145,6 +145,8 @@ pub const CronConfig = struct {
 pub const TelegramConfig = struct {
     bot_token: []const u8,
     allow_from: []const []const u8 = &.{},
+    group_allow_from: []const []const u8 = &.{},
+    group_policy: []const u8 = "allowlist",
     /// Use reply-to in private (1:1) chats. Groups always use reply-to.
     reply_in_private: bool = true,
     /// Optional SOCKS5/HTTP proxy URL for all Telegram API requests (e.g. "socks5://host:port").
@@ -156,7 +158,7 @@ pub const DiscordConfig = struct {
     guild_id: ?[]const u8 = null,
     allow_bots: bool = false,
     allow_from: []const []const u8 = &.{},
-    mention_only: bool = false,
+    require_mention: bool = false,
     intents: u32 = 37377, // GUILDS|GUILD_MESSAGES|MESSAGE_CONTENT|DIRECT_MESSAGES
 };
 
@@ -176,6 +178,8 @@ pub const WebhookConfig = struct {
 
 pub const IMessageConfig = struct {
     allow_from: []const []const u8 = &.{},
+    group_allow_from: []const []const u8 = &.{},
+    group_policy: []const u8 = "allowlist",
     enabled: bool = false,
 };
 
@@ -192,6 +196,8 @@ pub const WhatsAppConfig = struct {
     verify_token: []const u8,
     app_secret: ?[]const u8 = null,
     allow_from: []const []const u8 = &.{},
+    group_allow_from: []const []const u8 = &.{},
+    group_policy: []const u8 = "allowlist",
 };
 
 pub const IrcConfig = struct {

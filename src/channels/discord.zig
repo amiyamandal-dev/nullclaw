@@ -16,7 +16,7 @@ pub const DiscordChannel = struct {
 
     // Optional gateway fields (have defaults so existing init works)
     allow_from: []const []const u8 = &.{},
-    mention_only: bool = false,
+    require_mention: bool = false,
     intents: u32 = 37377, // GUILDS|GUILD_MESSAGES|MESSAGE_CONTENT|DIRECT_MESSAGES
     bus: ?*bus_mod.Bus = null,
 
@@ -56,7 +56,7 @@ pub const DiscordChannel = struct {
             .guild_id = cfg.guild_id,
             .allow_bots = cfg.allow_bots,
             .allow_from = cfg.allow_from,
-            .mention_only = cfg.mention_only,
+            .require_mention = cfg.require_mention,
             .intents = cfg.intents,
         };
     }
@@ -639,8 +639,8 @@ pub const DiscordChannel = struct {
             return;
         }
 
-        // Filter 2: mention_only for guild (non-DM) messages
-        if (self.mention_only and guild_id != null) {
+        // Filter 2: require_mention for guild (non-DM) messages
+        if (self.require_mention and guild_id != null) {
             const bot_uid = self.bot_user_id orelse "";
             if (!isMentioned(content, bot_uid)) {
                 return;
@@ -894,7 +894,7 @@ test "discord initFromConfig passes all fields" {
         .guild_id = "guild-1",
         .allow_bots = true,
         .allow_from = &.{ "user1", "user2" },
-        .mention_only = true,
+        .require_mention = true,
         .intents = 512,
     };
     const ch = DiscordChannel.initFromConfig(std.testing.allocator, cfg);
@@ -902,7 +902,7 @@ test "discord initFromConfig passes all fields" {
     try std.testing.expectEqualStrings("guild-1", ch.guild_id.?);
     try std.testing.expect(ch.allow_bots);
     try std.testing.expectEqual(@as(usize, 2), ch.allow_from.len);
-    try std.testing.expect(ch.mention_only);
+    try std.testing.expect(ch.require_mention);
     try std.testing.expectEqual(@as(u32, 512), ch.intents);
 }
 

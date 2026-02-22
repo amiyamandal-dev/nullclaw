@@ -6,12 +6,21 @@ const root = @import("root.zig");
 pub const IMessageChannel = struct {
     allocator: std.mem.Allocator,
     allow_from: []const []const u8,
+    group_allow_from: []const []const u8,
+    group_policy: []const u8,
     poll_interval_secs: u64,
 
-    pub fn init(allocator: std.mem.Allocator, allow_from: []const []const u8) IMessageChannel {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        allow_from: []const []const u8,
+        group_allow_from: []const []const u8,
+        group_policy: []const u8,
+    ) IMessageChannel {
         return .{
             .allocator = allocator,
             .allow_from = allow_from,
+            .group_allow_from = group_allow_from,
+            .group_policy = group_policy,
             .poll_interval_secs = 3,
         };
     }
@@ -282,32 +291,32 @@ test "invalid target injection attempt" {
 
 test "imessage creates with contacts" {
     const contacts = [_][]const u8{"+1234567890"};
-    const ch = IMessageChannel.init(std.testing.allocator, &contacts);
+    const ch = IMessageChannel.init(std.testing.allocator, &contacts, &.{}, "allowlist");
     try std.testing.expectEqual(@as(usize, 1), ch.allow_from.len);
     try std.testing.expectEqual(@as(u64, 3), ch.poll_interval_secs);
 }
 
 test "imessage creates with empty contacts" {
-    const ch = IMessageChannel.init(std.testing.allocator, &.{});
+    const ch = IMessageChannel.init(std.testing.allocator, &.{}, &.{}, "allowlist");
     try std.testing.expectEqual(@as(usize, 0), ch.allow_from.len);
 }
 
 test "imessage contact case insensitive" {
     const contacts = [_][]const u8{"User@iCloud.com"};
-    const ch = IMessageChannel.init(std.testing.allocator, &contacts);
+    const ch = IMessageChannel.init(std.testing.allocator, &contacts, &.{}, "allowlist");
     try std.testing.expect(ch.isContactAllowed("user@icloud.com"));
     try std.testing.expect(ch.isContactAllowed("USER@ICLOUD.COM"));
 }
 
 test "imessage wildcard among others still allows all" {
     const contacts = [_][]const u8{ "+111", "*", "+222" };
-    const ch = IMessageChannel.init(std.testing.allocator, &contacts);
+    const ch = IMessageChannel.init(std.testing.allocator, &contacts, &.{}, "allowlist");
     try std.testing.expect(ch.isContactAllowed("totally-unknown"));
 }
 
 test "imessage unknown contact denied with hacker email" {
     const contacts = [_][]const u8{"+1234567890"};
-    const ch = IMessageChannel.init(std.testing.allocator, &contacts);
+    const ch = IMessageChannel.init(std.testing.allocator, &contacts, &.{}, "allowlist");
     try std.testing.expect(!ch.isContactAllowed("hacker@evil.com"));
 }
 

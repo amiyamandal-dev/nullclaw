@@ -1330,7 +1330,7 @@ test "parse telegram accounts" {
 test "parse discord accounts" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"channels": {"discord": {"accounts": {"main": {"token": "disc-tok", "guild_id": "12345", "allow_from": ["u1"], "mention_only": true}}}}}
+        \\{"channels": {"discord": {"accounts": {"main": {"token": "disc-tok", "guild_id": "12345", "allow_from": ["u1"], "require_mention": true}}}}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -1338,7 +1338,7 @@ test "parse discord accounts" {
     const dc = cfg.channels.discord.?;
     try std.testing.expectEqualStrings("disc-tok", dc.token);
     try std.testing.expectEqualStrings("12345", dc.guild_id.?);
-    try std.testing.expect(dc.mention_only);
+    try std.testing.expect(dc.require_mention);
     allocator.free(dc.token);
     allocator.free(dc.guild_id.?);
     for (dc.allow_from) |u| allocator.free(u);

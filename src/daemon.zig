@@ -252,7 +252,7 @@ fn channelSupervisorThread(
                 state.markError("channels", "failed to alloc health channel");
                 return;
             };
-            hc.* = telegram.TelegramChannel.init(allocator, tg_config.bot_token, tg_config.allow_from);
+            hc.* = telegram.TelegramChannel.init(allocator, tg_config.bot_token, tg_config.allow_from, tg_config.group_allow_from, tg_config.group_policy);
             hc.proxy = tg_config.proxy;
             tg_health_channel = hc;
 
