@@ -30,6 +30,11 @@ const Color = struct {
 };
 
 pub fn shouldColorize(file: std.fs.File) bool {
+    // Respect NO_COLOR convention (https://no-color.org/)
+    if (comptime builtin.os.tag != .windows) {
+        if (std.posix.getenv("NO_COLOR")) |_| return false;
+    }
+
     // Never colorize if stdout is redirected to a file/pipe
     if (!file.isTty()) return false;
 
@@ -537,21 +542,17 @@ pub fn checkEnvironment(
     // git
     if (try checkCommandAvailable(allocator, "git")) |ver| {
         defer allocator.free(ver);
-        if (std.mem.startsWith(u8, ver, "not found")) {
-            try items.append(allocator, DiagItem.warn(cat, try std.fmt.allocPrint(allocator, "git {s}", .{ver})));
-        } else {
-            try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "git: {s}", .{ver})));
-        }
+        try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "git: {s}", .{ver})));
+    } else {
+        try items.append(allocator, DiagItem.warn(cat, "git not found"));
     }
 
     // curl
     if (try checkCommandAvailable(allocator, "curl")) |ver| {
         defer allocator.free(ver);
-        if (std.mem.startsWith(u8, ver, "not found")) {
-            try items.append(allocator, DiagItem.warn(cat, try std.fmt.allocPrint(allocator, "curl {s}", .{ver})));
-        } else {
-            try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "curl: {s}", .{ver})));
-        }
+        try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "curl: {s}", .{ver})));
+    } else {
+        try items.append(allocator, DiagItem.warn(cat, "curl not found"));
     }
 
     // $SHELL
@@ -580,9 +581,7 @@ fn checkCommandAvailable(allocator: std.mem.Allocator, cmd: []const u8) !?[]cons
         .allocator = allocator,
         .argv = &.{ cmd, "--version" },
         .max_output_bytes = 1024,
-    }) catch |e| {
-        return try std.fmt.allocPrint(allocator, "not found (err: {s})", .{@errorName(e)});
-    };
+    }) catch return null;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -705,6 +704,28 @@ test "DiagItem.icon returns correct string" {
     try std.testing.expectEqualStrings("[ok]", DiagItem.ok("t", "m").icon());
     try std.testing.expectEqualStrings("[warn]", DiagItem.warn("t", "m").icon());
     try std.testing.expectEqualStrings("[ERR]", DiagItem.err("t", "m").icon());
+}
+
+test "DiagItem.iconColored returns ANSI-colored strings" {
+    const ok_icon = DiagItem.ok("t", "m").iconColored();
+    try std.testing.expect(std.mem.indexOf(u8, ok_icon, "\x1b[32m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ok_icon, "[ok]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ok_icon, "\x1b[0m") != null);
+
+    const warn_icon = DiagItem.warn("t", "m").iconColored();
+    try std.testing.expect(std.mem.indexOf(u8, warn_icon, "\x1b[33m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warn_icon, "[warn]") != null);
+
+    const err_icon = DiagItem.err("t", "m").iconColored();
+    try std.testing.expect(std.mem.indexOf(u8, err_icon, "\x1b[31m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_icon, "[ERR]") != null);
+}
+
+test "shouldColorize returns false for non-TTY file" {
+    // Open /dev/null — it's not a TTY, so shouldColorize should return false
+    const devnull = std.fs.openFileAbsolute("/dev/null", .{}) catch return;
+    defer devnull.close();
+    try std.testing.expect(!shouldColorize(devnull));
 }
 
 test "checkConfigSemantics catches temperature out of range" {
