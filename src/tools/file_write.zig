@@ -92,17 +92,57 @@ pub const FileWriteTool = struct {
             };
         }
 
-        // Write file
-        const file = std.fs.createFileAbsolute(full_path, .{}) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to create file: {}", .{err});
+        // Write via temp file + rename so existing hard links are not modified in place.
+        const parent = std.fs.path.dirname(full_path) orelse full_path;
+        const basename = std.fs.path.basename(full_path);
+        var parent_dir = std.fs.openDirAbsolute(parent, .{}) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Failed to open directory: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
+        defer parent_dir.close();
+
+        var tmp_name_buf: [128]u8 = undefined;
+        var tmp_name_len: usize = 0;
+        var tmp_file: ?std.fs.File = null;
+        var attempt: usize = 0;
+        while (attempt < 32) : (attempt += 1) {
+            const tmp_name = std.fmt.bufPrint(
+                &tmp_name_buf,
+                ".nullclaw-write-{d}-{d}.tmp",
+                .{ std.time.nanoTimestamp(), attempt },
+            ) catch unreachable;
+            tmp_file = parent_dir.createFile(tmp_name, .{ .exclusive = true }) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => {
+                    const msg = try std.fmt.allocPrint(allocator, "Failed to create file: {}", .{err});
+                    return ToolResult{ .success = false, .output = "", .error_msg = msg };
+                },
+            };
+            tmp_name_len = tmp_name.len;
+            break;
+        }
+        if (tmp_file == null) {
+            return ToolResult.fail("Failed to create temporary file");
+        }
+
+        var file = tmp_file.?;
         defer file.close();
+
+        var committed = false;
+        defer if (!committed and tmp_name_len > 0) {
+            parent_dir.deleteFile(tmp_name_buf[0..tmp_name_len]) catch {};
+        };
 
         file.writeAll(content) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to write file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
+
+        parent_dir.rename(tmp_name_buf[0..tmp_name_len], basename) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Failed to replace file: {}", .{err});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        };
+        committed = true;
 
         const final_resolved = std.fs.cwd().realpathAlloc(allocator, full_path) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to resolve path: {}", .{err});
@@ -306,6 +346,45 @@ test "file_write blocks symlink target escape outside workspace" {
     const outside_actual = try outside_tmp.dir.readFileAlloc(std.testing.allocator, "outside.txt", 1024);
     defer std.testing.allocator.free(outside_actual);
     try std.testing.expectEqualStrings("safe", outside_actual);
+}
+
+test "file_write does not mutate outside inode through hard link" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var ws_tmp = std.testing.tmpDir(.{});
+    defer ws_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+
+    const ws_path = try ws_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+    const outside_path = try outside_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(outside_path);
+
+    try outside_tmp.dir.writeFile(.{ .sub_path = "outside.txt", .data = "SAFE" });
+    const outside_file = try std.fs.path.join(std.testing.allocator, &.{ outside_path, "outside.txt" });
+    defer std.testing.allocator.free(outside_file);
+    const hardlink_path = try std.fs.path.join(std.testing.allocator, &.{ ws_path, "hl.txt" });
+    defer std.testing.allocator.free(hardlink_path);
+
+    try std.posix.link(outside_file, hardlink_path);
+
+    var ft = FileWriteTool{ .workspace_dir = ws_path };
+    const t = ft.tool();
+    const parsed = try root.parseTestArgs("{\"path\": \"hl.txt\", \"content\": \"PWNED\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+    try std.testing.expect(result.success);
+
+    const workspace_actual = try ws_tmp.dir.readFileAlloc(std.testing.allocator, "hl.txt", 1024);
+    defer std.testing.allocator.free(workspace_actual);
+    try std.testing.expectEqualStrings("PWNED", workspace_actual);
+
+    const outside_actual = try outside_tmp.dir.readFileAlloc(std.testing.allocator, "outside.txt", 1024);
+    defer std.testing.allocator.free(outside_actual);
+    try std.testing.expectEqualStrings("SAFE", outside_actual);
 }
 
 test "file_write rejects disallowed absolute path without creating parent directories" {
