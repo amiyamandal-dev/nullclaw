@@ -2087,7 +2087,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     const stdout = &bw.interface;
     try stdout.print("Gateway listening on {s}:{d}\n", .{ host, port });
     try stdout.flush();
-    if (config_opt) |*cfg| {
+    if (config_opt) |cfg| {
         cfg.printModelConfig();
     }
     if (state.pairing_guard) |*guard| {
