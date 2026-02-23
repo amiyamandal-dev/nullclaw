@@ -319,7 +319,6 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
             \\Commands:
             \\  list                          List configured channels
             \\  start [channel]               Start a channel (default: first available)
-            \\  start-all [--port] [--host]   Start all configured channels/accounts
             \\  doctor                        Run health checks
             \\  add <type> <config_json>      Add a channel
             \\  remove <name>                 Remove a channel
@@ -345,8 +344,6 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         }
     } else if (std.mem.eql(u8, subcmd, "start")) {
         try runChannelStart(allocator, sub_args[1..]);
-    } else if (std.mem.eql(u8, subcmd, "start-all")) {
-        try runChannelStartAll(allocator, sub_args[1..]);
     } else if (std.mem.eql(u8, subcmd, "doctor")) {
         std.debug.print("Channel health:\n", .{});
         std.debug.print("  CLI: ok\n", .{});
@@ -687,6 +684,7 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // Usage: nullclaw channel start [channel]
 // If a channel name is given, start that specific channel.
 // Otherwise, start the first available (Telegram first, then Signal).
+// To run all configured channels/accounts together, use `nullclaw gateway`.
 
 fn canStartFromChannelCommand(channel_id: yc.channel_catalog.ChannelId) bool {
     return switch (channel_id) {
@@ -751,6 +749,11 @@ fn printNoMessagingChannelConfiguredHint() void {
 }
 
 fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "--all")) {
+        std.debug.print("Use `nullclaw gateway` to start all configured channels/accounts.\n", .{});
+        std.process.exit(1);
+    }
+
     // Load config
     var config = yc.config.Config.load(allocator) catch {
         std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
@@ -812,31 +815,6 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     }
 }
 
-fn runChannelStartAll(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    var config = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
-    };
-    defer config.deinit();
-
-    applyGatewayDaemonOverrides(&config, sub_args) catch {
-        std.debug.print("Invalid port in CLI args.\n", .{});
-        std.process.exit(1);
-    };
-
-    config.validate() catch |err| {
-        yc.config.Config.printValidationError(err);
-        std.process.exit(1);
-    };
-
-    if (!hasConfiguredStartableChannels(&config)) {
-        printNoMessagingChannelConfiguredHint();
-        std.process.exit(1);
-    }
-
-    return runAllConfiguredChannels(allocator, &config);
-}
-
 /// Start a single configured non-polling channel using ChannelManager.
 fn runGatewayChannel(allocator: std.mem.Allocator, config: *const yc.config.Config, ch_name: []const u8) !void {
     var registry = yc.channels.dispatch.ChannelRegistry.init(allocator);
@@ -871,19 +849,6 @@ fn runGatewayChannel(allocator: std.mem.Allocator, config: *const yc.config.Conf
     while (!yc.daemon.isShutdownRequested()) {
         std.Thread.sleep(1 * std.time.ns_per_s);
     }
-}
-
-fn applyChannelStartRuntimeProfile(cfg: *yc.config.Config) void {
-    // `channel start` should run channel listeners and message routing only.
-    // Keep scheduler/heartbeat for `nullclaw daemon`.
-    cfg.scheduler.enabled = false;
-    cfg.heartbeat.enabled = false;
-}
-
-fn runAllConfiguredChannels(allocator: std.mem.Allocator, config: *yc.config.Config) !void {
-    applyChannelStartRuntimeProfile(config);
-    std.debug.print("Starting all configured channels and accounts (runtime mode)...\n", .{});
-    return yc.daemon.run(allocator, config, config.gateway.host, config.gateway.port);
 }
 
 // ── Signal Channel ─────────────────────────────────────────────────
@@ -1814,7 +1779,7 @@ fn printUsage() void {
         \\  version | --version | -V
         \\  service <install|start|stop|status|uninstall>
         \\  cron <list|add|once|remove|pause|resume> [ARGS]
-        \\  channel <list|start|start-all|doctor|add|remove> [ARGS]
+        \\  channel <list|start|doctor|add|remove> [ARGS]
         \\  skills <list|install|remove> [ARGS]
         \\  hardware <discover|introspect|info> [ARGS]
         \\  migrate openclaw [--dry-run] [--source PATH]
@@ -1877,22 +1842,6 @@ test "applyGatewayDaemonOverrides rejects invalid port" {
     };
     const args = [_][]const u8{ "--port", "bad" };
     try std.testing.expectError(error.InvalidPort, applyGatewayDaemonOverrides(&cfg, &args));
-}
-
-test "applyChannelStartRuntimeProfile disables scheduler and heartbeat" {
-    var cfg = yc.config.Config{
-        .workspace_dir = "/tmp/nullclaw-test",
-        .config_path = "/tmp/nullclaw-test/config.json",
-        .default_model = "openrouter/auto",
-        .allocator = std.testing.allocator,
-    };
-    cfg.scheduler.enabled = true;
-    cfg.heartbeat.enabled = true;
-
-    applyChannelStartRuntimeProfile(&cfg);
-
-    try std.testing.expect(!cfg.scheduler.enabled);
-    try std.testing.expect(!cfg.heartbeat.enabled);
 }
 
 test "hasConfiguredStartableChannels ignores cli and webhook-only defaults" {
