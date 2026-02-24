@@ -36,6 +36,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
 const config_types = @import("../config_types.zig");
+const sse_client = @import("../sse_client.zig");
 
 const log = std.log.scoped(.signal);
 
@@ -89,8 +90,8 @@ pub const RecipientTarget = union(enum) {
 /// Signal channel — uses signal-cli daemon's native JSON-RPC + SSE API.
 ///
 /// Sends messages via JSON-RPC POST to `/api/v1/rpc`.
-/// The SSE listener (for incoming messages) would be driven by the
-/// dispatch loop calling `pollMessages()`.
+/// The SSE listener (for incoming messages) uses streaming HTTP for
+/// real-time message delivery.
 pub const SignalChannel = struct {
     allocator: std.mem.Allocator,
     account_id: []const u8 = "default",
@@ -110,6 +111,15 @@ pub const SignalChannel = struct {
     ignore_attachments: bool,
     /// Skip story messages.
     ignore_stories: bool,
+    /// Persistent SSE connection for streaming message delivery.
+    /// Initialized on first poll, maintained across polls for real-time delivery.
+    sse_conn: ?sse_client.SseConnection = null,
+    /// Buffer for accumulating SSE data between reads.
+    sse_buffer: std.ArrayListUnmanaged(u8) = .empty,
+    /// Backoff for reconnect attempts after SSE connect failures.
+    sse_retry_delay_secs: u64 = 2,
+    /// Earliest wall-clock timestamp (seconds) for the next reconnect attempt.
+    sse_next_retry_at: i64 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -169,7 +179,6 @@ pub const SignalChannel = struct {
         try w.writeAll(self.http_url);
         try w.writeAll(SIGNAL_SSE_ENDPOINT);
         try w.writeAll("?account=");
-        // URL-encode the account (mainly the '+' character)
         for (self.account) |c| {
             if (c == '+') {
                 try w.writeAll("%2B");
@@ -503,11 +512,31 @@ pub const SignalChannel = struct {
 
     // ── SSE Message Polling ─────────────────────────────────────────
 
-    const ENVELOPE_PREFIX = "data:";
-    const ENVELOPE_SUFFIX = "\n\n";
+    const EventBoundary = struct {
+        end: usize,
+        next: usize,
+    };
 
-    fn parseSSEEnvelope(self: *const SignalChannel, envelope_json: []const u8) !?root.ChannelMessage {
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, envelope_json, .{}) catch return null;
+    fn nextEventBoundary(buffer: []const u8, start: usize) ?EventBoundary {
+        const lf_idx = std.mem.indexOfPos(u8, buffer, start, "\n\n");
+        const crlf_idx = std.mem.indexOfPos(u8, buffer, start, "\r\n\r\n");
+        if (lf_idx == null and crlf_idx == null) return null;
+
+        if (crlf_idx != null and (lf_idx == null or crlf_idx.? < lf_idx.?)) {
+            return .{
+                .end = crlf_idx.?,
+                .next = crlf_idx.? + 4,
+            };
+        }
+
+        return .{
+            .end = lf_idx.?,
+            .next = lf_idx.? + 2,
+        };
+    }
+
+    fn parseSSEEnvelope(self: *const SignalChannel, allocator: std.mem.Allocator, envelope_json: []const u8) !?root.ChannelMessage {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, envelope_json, .{}) catch return null;
         defer parsed.deinit();
 
         if (parsed.value != .object) return null;
@@ -525,7 +554,7 @@ pub const SignalChannel = struct {
         var dm_timestamp: ?u64 = null;
         var dm_group_id: ?[]const u8 = null;
         var dm_attachment_ids: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer dm_attachment_ids.deinit(self.allocator);
+        defer dm_attachment_ids.deinit(allocator);
 
         // Check for story message
         if (env_obj.get("storyMessage")) |story| {
@@ -565,7 +594,7 @@ pub const SignalChannel = struct {
                         for (att.array.items) |item| {
                             if (item == .object) {
                                 if (item.object.get("id")) |id_val| {
-                                    if (id_val == .string) try dm_attachment_ids.append(self.allocator, id_val.string);
+                                    if (id_val == .string) try dm_attachment_ids.append(allocator, id_val.string);
                                 }
                             }
                         }
@@ -575,7 +604,7 @@ pub const SignalChannel = struct {
         }
 
         return try self.processEnvelope(
-            self.allocator,
+            allocator,
             if (source) |s| if (s == .string) s.string else null else null,
             if (source_number) |s| if (s == .string) s.string else null else null,
             if (source_name) |s| if (s == .string) s.string else null else null,
@@ -589,29 +618,64 @@ pub const SignalChannel = struct {
     }
 
     /// Poll for messages using SSE (Server-Sent Events).
-    /// This is a long-poll that waits for incoming messages from signal-cli.
+    /// Uses persistent streaming HTTP connection for real-time delivery.
     /// Returns a slice of ChannelMessages allocated on the given allocator.
     pub fn pollMessages(self: *SignalChannel, allocator: std.mem.Allocator) ![]root.ChannelMessage {
         if (builtin.is_test) return &.{};
 
-        var url_buf: [1024]u8 = undefined;
-        const url = try self.sseUrl(&url_buf);
+        // Initialize SSE connection on first poll.
+        // Retry is rate-limited with backoff, but each poll call stays bounded.
+        if (self.sse_conn == null) {
+            const now = std.time.timestamp();
+            if (now < self.sse_next_retry_at) return &.{};
 
-        // Use curl with SSE flags (-N for no-buffer, Accept header)
-        // Use 10 second timeout - SSE returns when data arrives or timeout
-        const resp = root.http_util.curlGetSSE(allocator, url, "10") catch |err| {
-            log.warn("Signal SSE poll failed: {}", .{err});
-            return err;
-        };
-        defer allocator.free(resp);
+            var url_buf: [1024]u8 = undefined;
+            const url = try self.sseUrl(&url_buf);
 
-        if (resp.len == 0) {
+            self.sse_conn = sse_client.SseConnection.init(self.allocator, url);
+            const status = self.sse_conn.?.connect() catch |err| {
+                log.warn("SSE connect failed: {}, retrying in {}s", .{ err, self.sse_retry_delay_secs });
+                if (self.sse_conn) |*conn| {
+                    conn.deinit();
+                    self.sse_conn = null;
+                }
+                self.sse_next_retry_at = now + @as(i64, @intCast(self.sse_retry_delay_secs));
+                self.sse_retry_delay_secs = @min(self.sse_retry_delay_secs * 2, 60);
+                return &.{};
+            };
+            self.sse_retry_delay_secs = 2;
+            self.sse_next_retry_at = 0;
+            log.info("Signal SSE connected (status: {d})", .{status});
+        }
+
+        if (self.sse_conn == null) {
             return &.{};
         }
 
-        log.debug("SSE response: {s}", .{resp[0..@min(500, resp.len)]});
+        // Read from the streaming connection.
+        var read_buf: [8192]u8 = undefined;
+        const bytes_read = self.sse_conn.?.read(&read_buf) catch |err| {
+            // Connection lost or read error, reset and return empty to trigger reconnect.
+            log.warn("SSE read error: {}, reconnecting...", .{err});
+            if (self.sse_conn) |*conn| {
+                conn.deinit();
+                self.sse_conn = null;
+            }
+            self.sse_next_retry_at = 0;
+            self.sse_buffer.clearRetainingCapacity();
+            return &.{};
+        };
 
-        // Parse SSE response - each line is "data: {json}\n\n"
+        if (bytes_read == 0) {
+            // No data available right now - this is normal for streaming SSE
+            // Don't close the connection, just return empty and poll again later
+            return &.{};
+        }
+
+        // Append new data to buffer.
+        try self.sse_buffer.appendSlice(self.allocator, read_buf[0..bytes_read]);
+
+        // Parse SSE events from buffer
         var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
         errdefer {
             for (messages.items) |*msg| {
@@ -620,36 +684,44 @@ pub const SignalChannel = struct {
             messages.deinit(allocator);
         }
 
-        var data_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer data_buf.deinit(allocator);
+        // Parse SSE format: events separated by LF-LF or CRLF-CRLF.
+        var event_start: usize = 0;
+        while (event_start < self.sse_buffer.items.len) {
+            const boundary = nextEventBoundary(self.sse_buffer.items, event_start) orelse break;
+            const event_data = self.sse_buffer.items[event_start..boundary.end];
 
-        var lines = std.mem.splitScalar(u8, resp, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \r");
-            if (trimmed.len == 0) {
-                // End of event — process accumulated data
-                if (data_buf.items.len > 0) {
-                    if (self.parseSSEEnvelope(data_buf.items)) |msg_opt| {
-                        if (msg_opt) |msg| try messages.append(allocator, msg);
-                    } else |_| {}
-                    data_buf.clearRetainingCapacity();
+            // Parse all data: lines in the event (supports multiline JSON payloads).
+            {
+                const events = try sse_client.parseEvents(self.allocator, event_data);
+                defer {
+                    for (events) |*event| event.deinit(self.allocator);
+                    self.allocator.free(events);
                 }
-                continue;
+
+                for (events) |event| {
+                    if (self.parseSSEEnvelope(allocator, event.data)) |msg_opt| {
+                        if (msg_opt) |msg| {
+                            log.debug("Received message from {s} on signal ({d} chars) timestamp={d}", .{ msg.sender, msg.content.len, msg.timestamp });
+                            try messages.append(allocator, msg);
+                        }
+                    } else |_| {}
+                }
             }
-            if (trimmed[0] == ':') continue;
-            if (std.mem.startsWith(u8, trimmed, "event:")) continue;
-            if (std.mem.startsWith(u8, trimmed, ENVELOPE_PREFIX)) {
-                const json_start = trimmed[ENVELOPE_PREFIX.len..];
-                const json_trimmed = std.mem.trim(u8, json_start, " \r");
-                if (data_buf.items.len > 0) try data_buf.appendSlice(allocator, "\n");
-                try data_buf.appendSlice(allocator, json_trimmed);
-            }
+
+            // Move past this event delimiter.
+            event_start = boundary.next;
         }
-        // Handle final event if no trailing blank line
-        if (data_buf.items.len > 0) {
-            if (self.parseSSEEnvelope(data_buf.items)) |msg_opt| {
-                if (msg_opt) |msg| try messages.append(allocator, msg);
-            } else |_| {}
+
+        // Remove processed data from buffer.
+        if (event_start > 0) {
+            const remaining = self.sse_buffer.items[event_start..];
+            std.mem.copyForwards(u8, self.sse_buffer.items[0..remaining.len], remaining);
+            self.sse_buffer.items.len = remaining.len;
+        }
+
+        // Prevent unbounded growth if the stream keeps sending malformed/incomplete frames.
+        if (messages.items.len == 0 and self.sse_buffer.items.len > 65536) {
+            self.sse_buffer.clearRetainingCapacity();
         }
 
         return try messages.toOwnedSlice(allocator);
@@ -672,8 +744,17 @@ pub const SignalChannel = struct {
     }
 
     fn vtableStop(ptr: *anyopaque) void {
-        _ = ptr;
-        // Nothing to clean up for HTTP-based channel.
+        const self: *SignalChannel = @ptrCast(@alignCast(ptr));
+        // Clean up SSE connection
+        if (self.sse_conn) |*conn| {
+            conn.deinit();
+            self.sse_conn = null;
+        }
+        // Reset retry state.
+        self.sse_retry_delay_secs = 2;
+        self.sse_next_retry_at = 0;
+        // Clean up SSE buffer
+        self.sse_buffer.deinit(self.allocator);
     }
 
     fn vtableSend(ptr: *anyopaque, target: []const u8, message: []const u8, _: []const []const u8) anyerror!void {
@@ -2236,7 +2317,7 @@ test "parseSSEEnvelope returns owned message content" {
     const json_buf = try std.testing.allocator.dupe(u8, raw_json);
     defer std.testing.allocator.free(json_buf);
 
-    const msg_opt = try ch.parseSSEEnvelope(json_buf);
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, json_buf);
     try std.testing.expect(msg_opt != null);
     const msg = msg_opt.?;
     defer msg.deinit(std.testing.allocator);
@@ -2247,6 +2328,52 @@ test "parseSSEEnvelope returns owned message content" {
     @memset(churn, 'z');
 
     try std.testing.expectEqualStrings("hello from sse", msg.content);
+    try std.testing.expectEqualStrings("+1111111111", msg.sender);
+}
+
+test "nextEventBoundary handles lf and crlf delimiters" {
+    const lf_data = "data: one\n\nrest";
+    const lf_boundary = SignalChannel.nextEventBoundary(lf_data, 0).?;
+    try std.testing.expectEqual(@as(usize, 9), lf_boundary.end);
+    try std.testing.expectEqual(@as(usize, 11), lf_boundary.next);
+
+    const crlf_data = "data: two\r\n\r\nrest";
+    const crlf_boundary = SignalChannel.nextEventBoundary(crlf_data, 0).?;
+    try std.testing.expectEqual(@as(usize, 9), crlf_boundary.end);
+    try std.testing.expectEqual(@as(usize, 13), crlf_boundary.next);
+}
+
+test "parseSSEEnvelope accepts multiline SSE data payload" {
+    const users = [_][]const u8{"*"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+
+    const event_payload =
+        \\event: message
+        \\data: {"envelope":{"source":"+1111111111","sourceNumber":"+1111111111","timestamp":1700000000,
+        \\data: "dataMessage":{"message":"hello multiline","timestamp":1700000001}}}
+        \\
+    ;
+
+    const events = try sse_client.parseEvents(std.testing.allocator, event_payload);
+    defer {
+        for (events) |*event| event.deinit(std.testing.allocator);
+        std.testing.allocator.free(events);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, events[0].data);
+    try std.testing.expect(msg_opt != null);
+    const msg = msg_opt.?;
+    defer msg.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hello multiline", msg.content);
     try std.testing.expectEqualStrings("+1111111111", msg.sender);
 }
 
