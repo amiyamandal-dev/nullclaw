@@ -849,8 +849,13 @@ pub const TelegramChannel = struct {
 
         const now = root.nowEpochSecs();
 
+        // Own group ids in this scratch list: pending buffers can mutate/free ids
+        // on allocation-failure paths while we're still scanning.
         var flush_groups: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer flush_groups.deinit(self.allocator);
+        defer {
+            for (flush_groups.items) |gid| self.allocator.free(gid);
+            flush_groups.deinit(self.allocator);
+        }
 
         for (self.pending_media_group_ids.items) |mg_opt| {
             const mg = mg_opt orelse continue;
@@ -864,7 +869,12 @@ pub const TelegramChannel = struct {
                     break;
                 }
             }
-            if (!already_added) flush_groups.append(self.allocator, mg) catch {};
+            if (!already_added) {
+                const gid_owned = self.allocator.dupe(u8, mg) catch continue;
+                flush_groups.append(self.allocator, gid_owned) catch {
+                    self.allocator.free(gid_owned);
+                };
+            }
         }
 
         if (flush_groups.items.len == 0) return;
