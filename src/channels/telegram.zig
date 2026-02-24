@@ -103,6 +103,62 @@ fn eqlLower(a: []const u8, comptime b: []const u8) bool {
     return true;
 }
 
+fn isWindowsForbiddenFilenameChar(c: u8) bool {
+    return switch (c) {
+        '<', '>', ':', '"', '/', '\\', '|', '?', '*' => true,
+        else => c < 0x20,
+    };
+}
+
+fn isWindowsReservedBaseName(name: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(name, "CON")) return true;
+    if (std.ascii.eqlIgnoreCase(name, "PRN")) return true;
+    if (std.ascii.eqlIgnoreCase(name, "AUX")) return true;
+    if (std.ascii.eqlIgnoreCase(name, "NUL")) return true;
+
+    if (name.len == 4) {
+        if (std.ascii.eqlIgnoreCase(name[0..3], "COM") and name[3] >= '1' and name[3] <= '9') return true;
+        if (std.ascii.eqlIgnoreCase(name[0..3], "LPT") and name[3] >= '1' and name[3] <= '9') return true;
+    }
+    return false;
+}
+
+/// Sanitize a filename component for cross-platform safety (especially Windows).
+/// Replaces forbidden characters with `_`, trims trailing dot/space, and avoids
+/// reserved DOS device names such as `CON` and `LPT1`.
+fn sanitizeFilenameComponent(out: []u8, input: []const u8, limit: usize) []const u8 {
+    if (out.len == 0) return "";
+
+    const n = @min(@min(input.len, limit), out.len);
+    var w: usize = 0;
+    for (input[0..n]) |c| {
+        out[w] = if (isWindowsForbiddenFilenameChar(c)) '_' else c;
+        w += 1;
+    }
+
+    while (w > 0 and (out[w - 1] == ' ' or out[w - 1] == '.')) : (w -= 1) {}
+    if (w == 0) {
+        out[0] = '_';
+        w = 1;
+    }
+
+    const base = if (std.mem.indexOfScalar(u8, out[0..w], '.')) |dot|
+        out[0..dot]
+    else
+        out[0..w];
+    if (isWindowsReservedBaseName(base)) {
+        if (w < out.len) {
+            std.mem.copyBackwards(u8, out[1 .. w + 1], out[0..w]);
+            out[0] = '_';
+            w += 1;
+        } else {
+            out[0] = '_';
+        }
+    }
+
+    return out[0..w];
+}
+
 fn cloneChannelMessage(allocator: std.mem.Allocator, msg: root.ChannelMessage) !root.ChannelMessage {
     const id_dup = try allocator.dupe(u8, msg.id);
     errdefer allocator.free(id_dup);
@@ -1753,14 +1809,9 @@ fn downloadTelegramPhoto(allocator: std.mem.Allocator, bot_token: []const u8, fi
     defer allocator.free(tmp_dir);
     var path_buf: [512]u8 = undefined;
     var path_fbs = std.io.fixedBufferStream(&path_buf);
-    // Sanitize file_id for filesystem safety (replace / and \ with _)
     var name_buf: [256]u8 = undefined;
-    const safe_len = @min(file_id.len, 200);
-    @memcpy(name_buf[0..safe_len], file_id[0..safe_len]);
-    for (name_buf[0..safe_len]) |*c| {
-        if (c.* == '/' or c.* == '\\') c.* = '_';
-    }
-    path_fbs.writer().print("{s}/nullclaw_photo_{s}{s}", .{ tmp_dir, name_buf[0..safe_len], ext }) catch return null;
+    const safe_name = sanitizeFilenameComponent(&name_buf, file_id, 200);
+    path_fbs.writer().print("{s}/nullclaw_photo_{s}{s}", .{ tmp_dir, safe_name, ext }) catch return null;
     const local_path = path_fbs.getWritten();
 
     // Write file
@@ -1832,22 +1883,12 @@ fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, fil
     var path_fbs = std.io.fixedBufferStream(&path_buf);
 
     if (file_name) |fname| {
-        // Sanitize filename for filesystem safety; incorporate file_id for uniqueness
         var name_buf: [256]u8 = undefined;
-        const safe_len = @min(fname.len, 180);
-        @memcpy(name_buf[0..safe_len], fname[0..safe_len]);
-        for (name_buf[0..safe_len]) |*c| {
-            if (c.* == '/' or c.* == '\\') c.* = '_';
-        }
+        const safe_name = sanitizeFilenameComponent(&name_buf, fname, 180);
         // Use first 12 chars of file_id as prefix to prevent collisions
-        // Sanitize: file_id is Base64-like and may contain / or \
         var safe_id: [12]u8 = undefined;
-        const id_prefix_len = @min(file_id.len, 12);
-        @memcpy(safe_id[0..id_prefix_len], file_id[0..id_prefix_len]);
-        for (safe_id[0..id_prefix_len]) |*c| {
-            if (c.* == '/' or c.* == '\\') c.* = '_';
-        }
-        path_fbs.writer().print("{s}/nullclaw_doc_{s}_{s}", .{ tmp_dir, safe_id[0..id_prefix_len], name_buf[0..safe_len] }) catch return null;
+        const safe_id_part = sanitizeFilenameComponent(&safe_id, file_id, 12);
+        path_fbs.writer().print("{s}/nullclaw_doc_{s}_{s}", .{ tmp_dir, safe_id_part, safe_name }) catch return null;
     } else {
         // Fall back to file_id with extension from tg_file_path
         const ext = if (std.mem.lastIndexOfScalar(u8, tg_file_path, '.')) |dot|
@@ -1855,12 +1896,8 @@ fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, fil
         else
             "";
         var name_buf: [256]u8 = undefined;
-        const safe_len = @min(file_id.len, 200);
-        @memcpy(name_buf[0..safe_len], file_id[0..safe_len]);
-        for (name_buf[0..safe_len]) |*c| {
-            if (c.* == '/' or c.* == '\\') c.* = '_';
-        }
-        path_fbs.writer().print("{s}/nullclaw_doc_{s}{s}", .{ tmp_dir, name_buf[0..safe_len], ext }) catch return null;
+        const safe_name = sanitizeFilenameComponent(&name_buf, file_id, 200);
+        path_fbs.writer().print("{s}/nullclaw_doc_{s}{s}", .{ tmp_dir, safe_name, ext }) catch return null;
     }
     const local_path = path_fbs.getWritten();
 
@@ -2409,6 +2446,22 @@ test "telegram sendMediaMultipart data URI treated as local file" {
     const data_uri = "data:image/png;base64,iVBOR";
     try std.testing.expect(!(std.mem.startsWith(u8, data_uri, "http://") or
         std.mem.startsWith(u8, data_uri, "https://")));
+}
+
+test "telegram sanitizeFilenameComponent replaces Windows-invalid chars" {
+    var buf: [64]u8 = undefined;
+    const sanitized = sanitizeFilenameComponent(&buf, "report:Q1*?.txt ", 64);
+    try std.testing.expectEqualStrings("report_Q1__.txt", sanitized);
+}
+
+test "telegram sanitizeFilenameComponent avoids Windows reserved names" {
+    var buf: [32]u8 = undefined;
+    const con_name = sanitizeFilenameComponent(&buf, "CON", 32);
+    try std.testing.expectEqualStrings("_CON", con_name);
+
+    var buf2: [32]u8 = undefined;
+    const lpt_name = sanitizeFilenameComponent(&buf2, "LPT1.txt", 32);
+    try std.testing.expectEqualStrings("_LPT1.txt", lpt_name);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
