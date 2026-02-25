@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const yc = @import("nullclaw");
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
@@ -972,6 +973,7 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // To run all configured channels/accounts together, use `nullclaw gateway`.
 
 fn canStartFromChannelCommand(channel_id: yc.channel_catalog.ChannelId) bool {
+    if (!yc.channel_catalog.isBuildEnabled(channel_id)) return false;
     return switch (channel_id) {
         .cli, .webhook => false,
         else => true,
@@ -993,6 +995,11 @@ fn dispatchChannelStart(
     config: *const yc.config.Config,
     meta: yc.channel_catalog.ChannelMeta,
 ) !void {
+    if (!yc.channel_catalog.isBuildEnabled(meta.id)) {
+        std.debug.print("{s} channel is disabled in this build.\n", .{meta.label});
+        std.process.exit(1);
+    }
+
     switch (meta.id) {
         .telegram => {
             if (config.channels.telegramPrimary()) |tg_config| {
@@ -1065,6 +1072,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
             printChannelStartSupported();
             std.process.exit(1);
         };
+        if (!yc.channel_catalog.isBuildEnabled(meta.id)) {
+            std.debug.print("Channel {s} is disabled in this build.\n", .{ch_name});
+            printChannelStartSupported();
+            std.process.exit(1);
+        }
         if (!canStartFromChannelCommand(meta.id)) {
             std.debug.print("Channel {s} cannot be started via `channel start`.\n", .{ch_name});
             printChannelStartSupported();
@@ -1163,6 +1175,10 @@ fn hasReliabilityCredentialFallback(allocator: std.mem.Allocator, config: *const
 
 fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, config: *const yc.config.Config, signal_config: yc.config.SignalConfig) !void {
     _ = args;
+    if (!build_options.enable_channel_signal) {
+        std.debug.print("Signal channel is disabled in this build.\n", .{});
+        std.process.exit(1);
+    }
 
     // Resolve API key: config providers first, then env vars (ANTHROPIC_API_KEY, etc.)
     const resolved_api_key = yc.providers.resolveApiKeyFromConfig(
@@ -1405,6 +1421,10 @@ fn runMatrixChannel(
     matrix_config: yc.config.MatrixConfig,
 ) !void {
     _ = args;
+    if (!build_options.enable_channel_matrix) {
+        std.debug.print("Matrix channel is disabled in this build.\n", .{});
+        std.process.exit(1);
+    }
 
     var mx = yc.channels.matrix.MatrixChannel.initFromConfig(allocator, matrix_config);
 
@@ -1446,6 +1466,11 @@ fn runMatrixChannel(
 // ── Telegram Channel ───────────────────────────────────────────────-
 
 fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, config: yc.config.Config, telegram_config: yc.config.TelegramConfig) !void {
+    if (!build_options.enable_channel_telegram) {
+        std.debug.print("Telegram channel is disabled in this build.\n", .{});
+        std.process.exit(1);
+    }
+
     // Determine allowed users: --user CLI args override config allow_from
     var user_list: std.ArrayList([]const u8) = .empty;
     defer user_list.deinit(allocator);

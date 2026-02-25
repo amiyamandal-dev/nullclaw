@@ -11,6 +11,7 @@
 //! Uses std.http.Server (built-in, no external deps).
 
 const std = @import("std");
+const build_options = @import("build_options");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const config_types = @import("config_types.zig");
@@ -654,6 +655,7 @@ fn selectWhatsAppConfig(
     body: ?[]const u8,
     verify_token: ?[]const u8,
 ) ?*const config_types.WhatsAppConfig {
+    if (!build_options.enable_channel_whatsapp) return null;
     const cfg = cfg_opt orelse return null;
     if (cfg.channels.whatsapp.len == 0) return null;
 
@@ -685,6 +687,7 @@ fn selectTelegramConfig(
     cfg_opt: ?*const Config,
     target: []const u8,
 ) ?*const config_types.TelegramConfig {
+    if (!build_options.enable_channel_telegram) return null;
     const cfg = cfg_opt orelse return null;
     if (cfg.channels.telegram.len == 0) return null;
 
@@ -708,6 +711,7 @@ fn selectTelegramConfig(
 }
 
 fn hasLineSecrets(cfg: *const Config) bool {
+    if (!build_options.enable_channel_line) return false;
     for (cfg.channels.line) |line_cfg| {
         if (line_cfg.channel_secret.len > 0) return true;
     }
@@ -719,6 +723,7 @@ fn selectLineConfigBySignature(
     body: []const u8,
     signature: ?[]const u8,
 ) ?*const config_types.LineConfig {
+    if (!build_options.enable_channel_line) return null;
     const cfg = cfg_opt orelse return null;
     if (cfg.channels.line.len == 0) return null;
 
@@ -750,6 +755,7 @@ fn selectLarkConfig(
     cfg_opt: ?*const Config,
     body: []const u8,
 ) ?*const config_types.LarkConfig {
+    if (!build_options.enable_channel_lark) return null;
     const cfg = cfg_opt orelse return null;
     if (cfg.channels.lark.len == 0) return null;
 
@@ -768,10 +774,12 @@ fn webhookBasePath(target: []const u8) []const u8 {
 }
 
 fn normalizeSlackWebhookPath(path: []const u8) []const u8 {
+    if (!build_options.enable_channel_slack) return path;
     return channels.slack.SlackChannel.normalizeWebhookPath(path);
 }
 
 fn hasSlackHttpEndpoint(cfg_opt: ?*const Config, base_path: []const u8) bool {
+    if (!build_options.enable_channel_slack) return false;
     const cfg = cfg_opt orelse return std.mem.eql(u8, base_path, channels.slack.SlackChannel.DEFAULT_WEBHOOK_PATH);
     for (cfg.channels.slack) |slack_cfg| {
         if (slack_cfg.mode != .http) continue;
@@ -828,6 +836,7 @@ fn findSlackConfigForRequest(
     timestamp_header: ?[]const u8,
     signature_header: ?[]const u8,
 ) ?*const config_types.SlackConfig {
+    if (!build_options.enable_channel_slack) return null;
     const cfg = cfg_opt orelse return null;
     if (cfg.channels.slack.len == 0) return null;
 
@@ -2765,6 +2774,10 @@ test "selectWhatsAppConfig picks account by phone_number_id" {
     };
     const body = "{\"entry\":[{\"changes\":[{\"value\":{\"metadata\":{\"phone_number_id\":\"222\"}}}]}]}";
     const selected = selectWhatsAppConfig(&cfg, body, null);
+    if (!build_options.enable_channel_whatsapp) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("backup", selected.?.account_id);
 }
@@ -2845,6 +2858,10 @@ test "selectWhatsAppConfig picks account by verify_token" {
         },
     };
     const selected = selectWhatsAppConfig(&cfg, null, "verify-b");
+    if (!build_options.enable_channel_whatsapp) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("backup", selected.?.account_id);
 }
@@ -2879,6 +2896,11 @@ test "selectLineConfigBySignature matches account and rejects bad signature" {
     const signature = std.base64.standard.Encoder.encode(&sig_buf, &mac);
 
     const selected = selectLineConfigBySignature(&cfg, body, signature);
+    if (!build_options.enable_channel_line) {
+        try std.testing.expect(selected == null);
+        try std.testing.expect(selectLineConfigBySignature(&cfg, body, "invalid-signature") == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("backup", selected.?.account_id);
     try std.testing.expect(selectLineConfigBySignature(&cfg, body, "invalid-signature") == null);
@@ -2909,6 +2931,10 @@ test "selectLarkConfig picks account by verification token" {
     };
     const body = "{\"header\":{\"token\":\"token-b\"}}";
     const selected = selectLarkConfig(&cfg, body);
+    if (!build_options.enable_channel_lark) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("backup", selected.?.account_id);
 }
@@ -3621,6 +3647,13 @@ test "hasSlackHttpEndpoint respects mode and webhook_path" {
         },
     };
 
+    if (!build_options.enable_channel_slack) {
+        try std.testing.expect(!hasSlackHttpEndpoint(&cfg, "/slack/custom"));
+        try std.testing.expect(!hasSlackHttpEndpoint(&cfg, "/slack/events"));
+        try std.testing.expect(!hasSlackHttpEndpoint(&cfg, "/line"));
+        return;
+    }
+
     try std.testing.expect(hasSlackHttpEndpoint(&cfg, "/slack/custom"));
     try std.testing.expect(!hasSlackHttpEndpoint(&cfg, "/slack/events"));
     try std.testing.expect(!hasSlackHttpEndpoint(&cfg, "/line"));
@@ -3679,6 +3712,10 @@ test "findSlackConfigForRequest selects account by verified signature" {
     };
 
     const selected = findSlackConfigForRequest(std.testing.allocator, &cfg, "/slack/events", body, ts, &sig_buf);
+    if (!build_options.enable_channel_slack) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("b", selected.?.account_id);
 }

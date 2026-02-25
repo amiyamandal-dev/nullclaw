@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const Config = @import("config.zig").Config;
 
 pub const ChannelId = enum {
@@ -59,6 +60,51 @@ pub const known_channels = [_]ChannelMeta{
     .{ .id = .maixcam, .key = "maixcam", .label = "MaixCam", .configured_message = "MaixCam configured", .listener_mode = .send_only },
 };
 
+pub fn isBuildEnabled(channel_id: ChannelId) bool {
+    return switch (channel_id) {
+        .cli => build_options.enable_channel_cli,
+        .telegram => build_options.enable_channel_telegram,
+        .discord => build_options.enable_channel_discord,
+        .slack => build_options.enable_channel_slack,
+        .webhook => true,
+        .imessage => build_options.enable_channel_imessage,
+        .matrix => build_options.enable_channel_matrix,
+        .mattermost => build_options.enable_channel_mattermost,
+        .whatsapp => build_options.enable_channel_whatsapp,
+        .irc => build_options.enable_channel_irc,
+        .lark => build_options.enable_channel_lark,
+        .dingtalk => build_options.enable_channel_dingtalk,
+        .signal => build_options.enable_channel_signal,
+        .email => build_options.enable_channel_email,
+        .line => build_options.enable_channel_line,
+        .qq => build_options.enable_channel_qq,
+        .onebot => build_options.enable_channel_onebot,
+        .maixcam => build_options.enable_channel_maixcam,
+    };
+}
+
+pub fn isBuildEnabledByKey(comptime key: []const u8) bool {
+    if (comptime std.mem.eql(u8, key, "cli")) return build_options.enable_channel_cli;
+    if (comptime std.mem.eql(u8, key, "telegram")) return build_options.enable_channel_telegram;
+    if (comptime std.mem.eql(u8, key, "discord")) return build_options.enable_channel_discord;
+    if (comptime std.mem.eql(u8, key, "slack")) return build_options.enable_channel_slack;
+    if (comptime std.mem.eql(u8, key, "webhook")) return true;
+    if (comptime std.mem.eql(u8, key, "imessage")) return build_options.enable_channel_imessage;
+    if (comptime std.mem.eql(u8, key, "matrix")) return build_options.enable_channel_matrix;
+    if (comptime std.mem.eql(u8, key, "mattermost")) return build_options.enable_channel_mattermost;
+    if (comptime std.mem.eql(u8, key, "whatsapp")) return build_options.enable_channel_whatsapp;
+    if (comptime std.mem.eql(u8, key, "irc")) return build_options.enable_channel_irc;
+    if (comptime std.mem.eql(u8, key, "lark")) return build_options.enable_channel_lark;
+    if (comptime std.mem.eql(u8, key, "dingtalk")) return build_options.enable_channel_dingtalk;
+    if (comptime std.mem.eql(u8, key, "signal")) return build_options.enable_channel_signal;
+    if (comptime std.mem.eql(u8, key, "email")) return build_options.enable_channel_email;
+    if (comptime std.mem.eql(u8, key, "line")) return build_options.enable_channel_line;
+    if (comptime std.mem.eql(u8, key, "qq")) return build_options.enable_channel_qq;
+    if (comptime std.mem.eql(u8, key, "onebot")) return build_options.enable_channel_onebot;
+    if (comptime std.mem.eql(u8, key, "maixcam")) return build_options.enable_channel_maixcam;
+    return true;
+}
+
 pub fn configuredCount(cfg: *const Config, channel_id: ChannelId) usize {
     return switch (channel_id) {
         .cli => if (cfg.channels.cli) 1 else 0,
@@ -83,10 +129,12 @@ pub fn configuredCount(cfg: *const Config, channel_id: ChannelId) usize {
 }
 
 pub fn isConfigured(cfg: *const Config, channel_id: ChannelId) bool {
-    return configuredCount(cfg, channel_id) > 0;
+    return isBuildEnabled(channel_id) and configuredCount(cfg, channel_id) > 0;
 }
 
 pub fn statusText(cfg: *const Config, meta: ChannelMeta, buf: []u8) []const u8 {
+    if (!isBuildEnabled(meta.id)) return "disabled in build";
+
     const count = configuredCount(cfg, meta.id);
     if (meta.id == .cli) {
         return if (count > 0) "enabled" else "disabled";
@@ -106,6 +154,7 @@ pub fn findByKey(key: []const u8) ?ChannelMeta {
 pub fn hasAnyConfigured(cfg: *const Config, include_cli: bool) bool {
     for (known_channels) |meta| {
         if (!include_cli and meta.id == .cli) continue;
+        if (!isBuildEnabled(meta.id)) continue;
         if (isConfigured(cfg, meta.id)) return true;
     }
     return false;
@@ -126,6 +175,7 @@ pub fn requiresRuntime(channel_id: ChannelId) bool {
 
 pub fn hasSupervisedChannels(cfg: *const Config) bool {
     for (known_channels) |meta| {
+        if (!isBuildEnabled(meta.id)) continue;
         if (!contributesToDaemonSupervision(meta.id)) continue;
         if (isConfigured(cfg, meta.id)) return true;
     }
@@ -134,6 +184,7 @@ pub fn hasSupervisedChannels(cfg: *const Config) bool {
 
 pub fn hasRuntimeDependentChannels(cfg: *const Config) bool {
     for (known_channels) |meta| {
+        if (!isBuildEnabled(meta.id)) continue;
         if (!requiresRuntime(meta.id)) continue;
         if (isConfigured(cfg, meta.id)) return true;
     }
@@ -141,6 +192,7 @@ pub fn hasRuntimeDependentChannels(cfg: *const Config) bool {
 }
 
 pub fn isChannelStartSupported(channel_id: ChannelId) bool {
+    if (!isBuildEnabled(channel_id)) return false;
     const meta = findById(channel_id) orelse return false;
     return meta.listener_mode != .none and channel_id != .webhook;
 }
@@ -208,7 +260,7 @@ test "hasSupervisedChannels excludes webhook and cli" {
             },
         },
     };
-    try std.testing.expect(hasSupervisedChannels(&cfg_signal));
+    try std.testing.expectEqual(isBuildEnabled(.signal), hasSupervisedChannels(&cfg_signal));
 }
 
 test "hasRuntimeDependentChannels includes inbound listeners only" {
@@ -222,7 +274,7 @@ test "hasRuntimeDependentChannels includes inbound listeners only" {
             },
         },
     };
-    try std.testing.expect(hasRuntimeDependentChannels(&cfg_send_only));
+    try std.testing.expectEqual(isBuildEnabled(.imessage), hasRuntimeDependentChannels(&cfg_send_only));
 
     const cfg_webhook = Config{
         .workspace_dir = "/tmp",
@@ -238,7 +290,7 @@ test "hasRuntimeDependentChannels includes inbound listeners only" {
             },
         },
     };
-    try std.testing.expect(hasRuntimeDependentChannels(&cfg_webhook));
+    try std.testing.expectEqual(isBuildEnabled(.line), hasRuntimeDependentChannels(&cfg_webhook));
 }
 
 test "findByKey finds known channels" {

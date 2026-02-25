@@ -1,6 +1,128 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const ChannelSelection = struct {
+    enable_channel_cli: bool = false,
+    enable_channel_telegram: bool = false,
+    enable_channel_discord: bool = false,
+    enable_channel_slack: bool = false,
+    enable_channel_whatsapp: bool = false,
+    enable_channel_matrix: bool = false,
+    enable_channel_mattermost: bool = false,
+    enable_channel_irc: bool = false,
+    enable_channel_imessage: bool = false,
+    enable_channel_email: bool = false,
+    enable_channel_lark: bool = false,
+    enable_channel_dingtalk: bool = false,
+    enable_channel_line: bool = false,
+    enable_channel_onebot: bool = false,
+    enable_channel_qq: bool = false,
+    enable_channel_maixcam: bool = false,
+    enable_channel_signal: bool = false,
+
+    fn enableAll(self: *ChannelSelection) void {
+        self.enable_channel_cli = true;
+        self.enable_channel_telegram = true;
+        self.enable_channel_discord = true;
+        self.enable_channel_slack = true;
+        self.enable_channel_whatsapp = true;
+        self.enable_channel_matrix = true;
+        self.enable_channel_mattermost = true;
+        self.enable_channel_irc = true;
+        self.enable_channel_imessage = true;
+        self.enable_channel_email = true;
+        self.enable_channel_lark = true;
+        self.enable_channel_dingtalk = true;
+        self.enable_channel_line = true;
+        self.enable_channel_onebot = true;
+        self.enable_channel_qq = true;
+        self.enable_channel_maixcam = true;
+        self.enable_channel_signal = true;
+    }
+};
+
+fn defaultChannels() ChannelSelection {
+    var selection = ChannelSelection{};
+    selection.enableAll();
+    return selection;
+}
+
+fn parseChannelsOption(raw: []const u8) !ChannelSelection {
+    var selection = ChannelSelection{};
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) {
+        std.log.err("empty -Dchannels list; use e.g. -Dchannels=all or -Dchannels=telegram,slack", .{});
+        return error.InvalidChannelsOption;
+    }
+
+    var saw_token = false;
+    var saw_all = false;
+    var saw_none = false;
+
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    while (it.next()) |token_raw| {
+        const token = std.mem.trim(u8, token_raw, " \t\r\n");
+        if (token.len == 0) continue;
+        saw_token = true;
+
+        if (std.mem.eql(u8, token, "all")) {
+            saw_all = true;
+            selection.enableAll();
+        } else if (std.mem.eql(u8, token, "none")) {
+            saw_none = true;
+            selection = .{};
+        } else if (std.mem.eql(u8, token, "cli")) {
+            selection.enable_channel_cli = true;
+        } else if (std.mem.eql(u8, token, "telegram")) {
+            selection.enable_channel_telegram = true;
+        } else if (std.mem.eql(u8, token, "discord")) {
+            selection.enable_channel_discord = true;
+        } else if (std.mem.eql(u8, token, "slack")) {
+            selection.enable_channel_slack = true;
+        } else if (std.mem.eql(u8, token, "whatsapp")) {
+            selection.enable_channel_whatsapp = true;
+        } else if (std.mem.eql(u8, token, "matrix")) {
+            selection.enable_channel_matrix = true;
+        } else if (std.mem.eql(u8, token, "mattermost")) {
+            selection.enable_channel_mattermost = true;
+        } else if (std.mem.eql(u8, token, "irc")) {
+            selection.enable_channel_irc = true;
+        } else if (std.mem.eql(u8, token, "imessage")) {
+            selection.enable_channel_imessage = true;
+        } else if (std.mem.eql(u8, token, "email")) {
+            selection.enable_channel_email = true;
+        } else if (std.mem.eql(u8, token, "lark")) {
+            selection.enable_channel_lark = true;
+        } else if (std.mem.eql(u8, token, "dingtalk")) {
+            selection.enable_channel_dingtalk = true;
+        } else if (std.mem.eql(u8, token, "line")) {
+            selection.enable_channel_line = true;
+        } else if (std.mem.eql(u8, token, "onebot")) {
+            selection.enable_channel_onebot = true;
+        } else if (std.mem.eql(u8, token, "qq")) {
+            selection.enable_channel_qq = true;
+        } else if (std.mem.eql(u8, token, "maixcam")) {
+            selection.enable_channel_maixcam = true;
+        } else if (std.mem.eql(u8, token, "signal")) {
+            selection.enable_channel_signal = true;
+        } else {
+            std.log.err("unknown channel '{s}' in -Dchannels list", .{token});
+            return error.InvalidChannelsOption;
+        }
+    }
+
+    if (!saw_token) {
+        std.log.err("empty -Dchannels list; use e.g. -Dchannels=all or -Dchannels=telegram,slack", .{});
+        return error.InvalidChannelsOption;
+    }
+    if (saw_all and saw_none) {
+        std.log.err("ambiguous -Dchannels list: cannot combine 'all' with 'none'", .{});
+        return error.InvalidChannelsOption;
+    }
+
+    return selection;
+}
+
 const EngineSelection = struct {
     // Base backends
     enable_memory_none: bool = false,
@@ -120,6 +242,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.23";
+    const channels_raw = b.option(
+        []const u8,
+        "channels",
+        "Channels list. Tokens: all|none|cli|telegram|discord|slack|whatsapp|matrix|mattermost|irc|imessage|email|lark|dingtalk|line|onebot|qq|maixcam|signal (default: all)",
+    );
+    const channels = if (channels_raw) |raw| blk: {
+        const parsed = parseChannelsOption(raw) catch {
+            std.process.exit(1);
+        };
+        break :blk parsed;
+    } else defaultChannels();
+
     const engines_raw = b.option(
         []const u8,
         "engines",
@@ -142,6 +276,23 @@ pub fn build(b: *std.Build) void {
     const enable_memory_redis = engines.enable_memory_redis;
     const enable_memory_lancedb = engines.enable_memory_lancedb;
     const enable_postgres = engines.enable_postgres;
+    const enable_channel_cli = channels.enable_channel_cli;
+    const enable_channel_telegram = channels.enable_channel_telegram;
+    const enable_channel_discord = channels.enable_channel_discord;
+    const enable_channel_slack = channels.enable_channel_slack;
+    const enable_channel_whatsapp = channels.enable_channel_whatsapp;
+    const enable_channel_matrix = channels.enable_channel_matrix;
+    const enable_channel_mattermost = channels.enable_channel_mattermost;
+    const enable_channel_irc = channels.enable_channel_irc;
+    const enable_channel_imessage = channels.enable_channel_imessage;
+    const enable_channel_email = channels.enable_channel_email;
+    const enable_channel_lark = channels.enable_channel_lark;
+    const enable_channel_dingtalk = channels.enable_channel_dingtalk;
+    const enable_channel_line = channels.enable_channel_line;
+    const enable_channel_onebot = channels.enable_channel_onebot;
+    const enable_channel_qq = channels.enable_channel_qq;
+    const enable_channel_maixcam = channels.enable_channel_maixcam;
+    const enable_channel_signal = channels.enable_channel_signal;
 
     const effective_enable_memory_sqlite = enable_sqlite and enable_memory_sqlite;
     const effective_enable_memory_lucid = enable_sqlite and enable_memory_lucid;
@@ -169,6 +320,23 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_memory_lucid", effective_enable_memory_lucid);
     build_options.addOption(bool, "enable_memory_redis", enable_memory_redis);
     build_options.addOption(bool, "enable_memory_lancedb", effective_enable_memory_lancedb);
+    build_options.addOption(bool, "enable_channel_cli", enable_channel_cli);
+    build_options.addOption(bool, "enable_channel_telegram", enable_channel_telegram);
+    build_options.addOption(bool, "enable_channel_discord", enable_channel_discord);
+    build_options.addOption(bool, "enable_channel_slack", enable_channel_slack);
+    build_options.addOption(bool, "enable_channel_whatsapp", enable_channel_whatsapp);
+    build_options.addOption(bool, "enable_channel_matrix", enable_channel_matrix);
+    build_options.addOption(bool, "enable_channel_mattermost", enable_channel_mattermost);
+    build_options.addOption(bool, "enable_channel_irc", enable_channel_irc);
+    build_options.addOption(bool, "enable_channel_imessage", enable_channel_imessage);
+    build_options.addOption(bool, "enable_channel_email", enable_channel_email);
+    build_options.addOption(bool, "enable_channel_lark", enable_channel_lark);
+    build_options.addOption(bool, "enable_channel_dingtalk", enable_channel_dingtalk);
+    build_options.addOption(bool, "enable_channel_line", enable_channel_line);
+    build_options.addOption(bool, "enable_channel_onebot", enable_channel_onebot);
+    build_options.addOption(bool, "enable_channel_qq", enable_channel_qq);
+    build_options.addOption(bool, "enable_channel_maixcam", enable_channel_maixcam);
+    build_options.addOption(bool, "enable_channel_signal", enable_channel_signal);
     const build_options_module = build_options.createModule();
 
     // ---------- library module (importable by consumers) ----------

@@ -236,6 +236,9 @@ pub const ChannelManager = struct {
             if (comptime std.mem.eql(u8, field.name, "cli") or std.mem.eql(u8, field.name, "webhook")) {
                 continue;
             }
+            if (comptime !channel_catalog.isBuildEnabledByKey(field.name)) {
+                continue;
+            }
             if (comptime !@hasDecl(channels_mod, field.name)) {
                 @compileError("channels/root.zig is missing module export for channel: " ++ field.name);
             }
@@ -709,6 +712,10 @@ fn findEntryByNameAccount(entries: []const Entry, name: []const u8, account_id: 
     return null;
 }
 
+fn expectEntryPresence(entries: []const Entry, name: []const u8, account_id: []const u8, should_exist: bool) !void {
+    try std.testing.expectEqual(should_exist, findEntryByNameAccount(entries, name, account_id) != null);
+}
+
 test "ChannelManager collectConfiguredChannels wires listener types accounts and bus" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -848,67 +855,162 @@ test "ChannelManager collectConfiguredChannels wires listener types accounts and
 
     try mgr.collectConfiguredChannels();
 
-    try std.testing.expectEqual(@as(usize, 17), mgr.count());
-    try std.testing.expectEqual(@as(usize, 17), reg.count());
+    var expected_total: usize = 0;
+    var expected_polling: usize = 0;
+    var expected_gateway_loop: usize = 0;
+    var expected_webhook_only: usize = 0;
+    var expected_send_only: usize = 0;
+
+    if (channel_catalog.isBuildEnabled(.telegram)) {
+        expected_total += telegram_accounts.len;
+        expected_polling += telegram_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.signal)) {
+        expected_total += signal_accounts.len;
+        expected_polling += signal_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.discord)) {
+        expected_total += discord_accounts.len;
+        expected_gateway_loop += discord_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.qq)) {
+        expected_total += qq_accounts.len;
+        expected_gateway_loop += qq_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.onebot)) {
+        expected_total += onebot_accounts.len;
+        expected_gateway_loop += onebot_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.mattermost)) {
+        expected_total += mattermost_accounts.len;
+        expected_gateway_loop += mattermost_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.slack)) {
+        expected_total += slack_accounts.len;
+        expected_gateway_loop += slack_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.maixcam)) {
+        expected_total += maixcam_accounts.len;
+        expected_send_only += maixcam_accounts.len;
+    }
+    if (channel_catalog.isBuildEnabled(.whatsapp)) {
+        expected_total += config.channels.whatsapp.len;
+        expected_webhook_only += config.channels.whatsapp.len;
+    }
+    if (channel_catalog.isBuildEnabled(.line)) {
+        expected_total += config.channels.line.len;
+        expected_webhook_only += config.channels.line.len;
+    }
+    if (channel_catalog.isBuildEnabled(.lark)) {
+        expected_total += config.channels.lark.len;
+        expected_webhook_only += config.channels.lark.len;
+    }
+    if (channel_catalog.isBuildEnabled(.matrix)) {
+        expected_total += config.channels.matrix.len;
+        expected_polling += config.channels.matrix.len;
+    }
+    if (channel_catalog.isBuildEnabled(.irc)) {
+        expected_total += config.channels.irc.len;
+        expected_gateway_loop += config.channels.irc.len;
+    }
+    if (channel_catalog.isBuildEnabled(.imessage)) {
+        expected_total += config.channels.imessage.len;
+        expected_gateway_loop += config.channels.imessage.len;
+    }
+    if (channel_catalog.isBuildEnabled(.email)) {
+        expected_total += config.channels.email.len;
+        expected_send_only += config.channels.email.len;
+    }
+    if (channel_catalog.isBuildEnabled(.dingtalk)) {
+        expected_total += config.channels.dingtalk.len;
+        expected_send_only += config.channels.dingtalk.len;
+    }
+
+    try std.testing.expectEqual(expected_total, mgr.count());
+    try std.testing.expectEqual(expected_total, reg.count());
 
     const entries = mgr.channelEntries();
-    try std.testing.expectEqual(@as(usize, 4), countEntriesByListenerType(entries, .polling));
-    try std.testing.expectEqual(@as(usize, 7), countEntriesByListenerType(entries, .gateway_loop));
-    try std.testing.expectEqual(@as(usize, 3), countEntriesByListenerType(entries, .webhook_only));
-    try std.testing.expectEqual(@as(usize, 3), countEntriesByListenerType(entries, .send_only));
+    try std.testing.expectEqual(expected_polling, countEntriesByListenerType(entries, .polling));
+    try std.testing.expectEqual(expected_gateway_loop, countEntriesByListenerType(entries, .gateway_loop));
+    try std.testing.expectEqual(expected_webhook_only, countEntriesByListenerType(entries, .webhook_only));
+    try std.testing.expectEqual(expected_send_only, countEntriesByListenerType(entries, .send_only));
     try std.testing.expectEqual(@as(usize, 0), countEntriesByListenerType(entries, .not_implemented));
 
-    try std.testing.expect(findEntryByNameAccount(entries, "telegram", "main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "telegram", "backup") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "signal", "sig-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "discord", "dc-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "qq", "qq-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "onebot", "ob-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "mattermost", "mm-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "slack", "sl-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "maixcam", "cam-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "whatsapp", "wa-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "line", "line-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "lark", "lark-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "matrix", "mx-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "irc", "irc-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "imessage", "imain") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "email", "email-main") != null);
-    try std.testing.expect(findEntryByNameAccount(entries, "dingtalk", "ding-main") != null);
+    try expectEntryPresence(entries, "telegram", "main", channel_catalog.isBuildEnabled(.telegram));
+    try expectEntryPresence(entries, "telegram", "backup", channel_catalog.isBuildEnabled(.telegram));
+    try expectEntryPresence(entries, "signal", "sig-main", channel_catalog.isBuildEnabled(.signal));
+    try expectEntryPresence(entries, "discord", "dc-main", channel_catalog.isBuildEnabled(.discord));
+    try expectEntryPresence(entries, "qq", "qq-main", channel_catalog.isBuildEnabled(.qq));
+    try expectEntryPresence(entries, "onebot", "ob-main", channel_catalog.isBuildEnabled(.onebot));
+    try expectEntryPresence(entries, "mattermost", "mm-main", channel_catalog.isBuildEnabled(.mattermost));
+    try expectEntryPresence(entries, "slack", "sl-main", channel_catalog.isBuildEnabled(.slack));
+    try expectEntryPresence(entries, "maixcam", "cam-main", channel_catalog.isBuildEnabled(.maixcam));
+    try expectEntryPresence(entries, "whatsapp", "wa-main", channel_catalog.isBuildEnabled(.whatsapp));
+    try expectEntryPresence(entries, "line", "line-main", channel_catalog.isBuildEnabled(.line));
+    try expectEntryPresence(entries, "lark", "lark-main", channel_catalog.isBuildEnabled(.lark));
+    try expectEntryPresence(entries, "matrix", "mx-main", channel_catalog.isBuildEnabled(.matrix));
+    try expectEntryPresence(entries, "irc", "irc-main", channel_catalog.isBuildEnabled(.irc));
+    try expectEntryPresence(entries, "imessage", "imain", channel_catalog.isBuildEnabled(.imessage));
+    try expectEntryPresence(entries, "email", "email-main", channel_catalog.isBuildEnabled(.email));
+    try expectEntryPresence(entries, "dingtalk", "ding-main", channel_catalog.isBuildEnabled(.dingtalk));
 
-    const discord_entry = findEntryByNameAccount(entries, "discord", "dc-main").?;
-    const discord_ptr: *discord.DiscordChannel = @ptrCast(@alignCast(discord_entry.channel.ptr));
-    try std.testing.expect(discord_ptr.bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.discord)) {
+        const discord_entry = findEntryByNameAccount(entries, "discord", "dc-main") orelse
+            return error.TestUnexpectedResult;
+        const discord_ptr: *discord.DiscordChannel = @ptrCast(@alignCast(discord_entry.channel.ptr));
+        try std.testing.expect(discord_ptr.bus == &event_bus);
+    }
 
-    const qq_entry = findEntryByNameAccount(entries, "qq", "qq-main").?;
-    const qq_ptr: *qq.QQChannel = @ptrCast(@alignCast(qq_entry.channel.ptr));
-    try std.testing.expect(qq_ptr.event_bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.qq)) {
+        const qq_entry = findEntryByNameAccount(entries, "qq", "qq-main") orelse
+            return error.TestUnexpectedResult;
+        const qq_ptr: *qq.QQChannel = @ptrCast(@alignCast(qq_entry.channel.ptr));
+        try std.testing.expect(qq_ptr.event_bus == &event_bus);
+    }
 
-    const onebot_entry = findEntryByNameAccount(entries, "onebot", "ob-main").?;
-    const onebot_ptr: *onebot.OneBotChannel = @ptrCast(@alignCast(onebot_entry.channel.ptr));
-    try std.testing.expect(onebot_ptr.event_bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.onebot)) {
+        const onebot_entry = findEntryByNameAccount(entries, "onebot", "ob-main") orelse
+            return error.TestUnexpectedResult;
+        const onebot_ptr: *onebot.OneBotChannel = @ptrCast(@alignCast(onebot_entry.channel.ptr));
+        try std.testing.expect(onebot_ptr.event_bus == &event_bus);
+    }
 
-    const mattermost_entry = findEntryByNameAccount(entries, "mattermost", "mm-main").?;
-    const mattermost_ptr: *mattermost.MattermostChannel = @ptrCast(@alignCast(mattermost_entry.channel.ptr));
-    try std.testing.expect(mattermost_ptr.bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.mattermost)) {
+        const mattermost_entry = findEntryByNameAccount(entries, "mattermost", "mm-main") orelse
+            return error.TestUnexpectedResult;
+        const mattermost_ptr: *mattermost.MattermostChannel = @ptrCast(@alignCast(mattermost_entry.channel.ptr));
+        try std.testing.expect(mattermost_ptr.bus == &event_bus);
+    }
 
-    const irc_entry = findEntryByNameAccount(entries, "irc", "irc-main").?;
-    const irc_ptr: *irc.IrcChannel = @ptrCast(@alignCast(irc_entry.channel.ptr));
-    try std.testing.expect(irc_ptr.bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.irc)) {
+        const irc_entry = findEntryByNameAccount(entries, "irc", "irc-main") orelse
+            return error.TestUnexpectedResult;
+        const irc_ptr: *irc.IrcChannel = @ptrCast(@alignCast(irc_entry.channel.ptr));
+        try std.testing.expect(irc_ptr.bus == &event_bus);
+    }
 
-    const imessage_entry = findEntryByNameAccount(entries, "imessage", "imain").?;
-    const imessage_ptr: *imessage.IMessageChannel = @ptrCast(@alignCast(imessage_entry.channel.ptr));
-    try std.testing.expect(imessage_ptr.bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.imessage)) {
+        const imessage_entry = findEntryByNameAccount(entries, "imessage", "imain") orelse
+            return error.TestUnexpectedResult;
+        const imessage_ptr: *imessage.IMessageChannel = @ptrCast(@alignCast(imessage_entry.channel.ptr));
+        try std.testing.expect(imessage_ptr.bus == &event_bus);
+    }
 
-    const maixcam_entry = findEntryByNameAccount(entries, "maixcam", "cam-main").?;
-    const maixcam_ptr: *maixcam.MaixCamChannel = @ptrCast(@alignCast(maixcam_entry.channel.ptr));
-    try std.testing.expect(maixcam_ptr.event_bus == &event_bus);
+    if (channel_catalog.isBuildEnabled(.maixcam)) {
+        const maixcam_entry = findEntryByNameAccount(entries, "maixcam", "cam-main") orelse
+            return error.TestUnexpectedResult;
+        const maixcam_ptr: *maixcam.MaixCamChannel = @ptrCast(@alignCast(maixcam_entry.channel.ptr));
+        try std.testing.expect(maixcam_ptr.event_bus == &event_bus);
+    }
 
-    const slack_entry = findEntryByNameAccount(entries, "slack", "sl-main").?;
-    const slack_ptr: *slack.SlackChannel = @ptrCast(@alignCast(slack_entry.channel.ptr));
-    try std.testing.expect(slack_ptr.bus == &event_bus);
-    try std.testing.expect(slack_ptr.policy.dm == .deny);
-    try std.testing.expect(slack_ptr.policy.group == .allowlist);
-    try std.testing.expectEqual(@as(usize, 1), slack_ptr.policy.allowlist.len);
-    try std.testing.expectEqualStrings("slack-admin", slack_ptr.policy.allowlist[0]);
+    if (channel_catalog.isBuildEnabled(.slack)) {
+        const slack_entry = findEntryByNameAccount(entries, "slack", "sl-main") orelse
+            return error.TestUnexpectedResult;
+        const slack_ptr: *slack.SlackChannel = @ptrCast(@alignCast(slack_entry.channel.ptr));
+        try std.testing.expect(slack_ptr.bus == &event_bus);
+        try std.testing.expect(slack_ptr.policy.dm == .deny);
+        try std.testing.expect(slack_ptr.policy.group == .allowlist);
+        try std.testing.expectEqual(@as(usize, 1), slack_ptr.policy.allowlist.len);
+        try std.testing.expectEqualStrings("slack-admin", slack_ptr.policy.allowlist[0]);
+    }
 }
