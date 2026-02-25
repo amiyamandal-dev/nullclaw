@@ -449,6 +449,14 @@ pub const Config = struct {
                 if (entry.base_url) |base| {
                     if (has_field) try w.print(", ", .{});
                     try w.print("\"base_url\": \"{s}\"", .{base});
+                    has_field = true;
+                }
+                if (comptime @hasField(ProviderEntry, "native_tools")) {
+                    if (!entry.native_tools) {
+                        if (has_field) try w.print(", ", .{});
+                        try w.print("\"native_tools\": false", .{});
+                        has_field = true;
+                    }
                 }
                 try w.print("}}", .{});
                 if (i + 1 < self.providers.len) try w.print(",", .{});
@@ -2053,6 +2061,41 @@ test "json parse providers section" {
         if (e.base_url) |b| allocator.free(b);
     }
     allocator.free(cfg.providers);
+}
+
+test "save writes provider native_tools when false" {
+    if (!comptime @hasField(ProviderEntry, "native_tools")) return;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.providers = &.{
+        .{
+            .name = "groq",
+            .api_key = "gsk_test",
+            .native_tools = false,
+        },
+    };
+
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"native_tools\": false") != null);
 }
 
 test "json parse tools.media.audio section" {
