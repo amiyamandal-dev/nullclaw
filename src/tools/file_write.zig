@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -77,17 +78,25 @@ pub const FileWriteTool = struct {
         }
 
         const existing_is_symlink = if (resolved_target != null) blk: {
+            if (comptime builtin.os.tag == .windows) break :blk false;
             break :blk isSymlinkPath(full_path) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to inspect path: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
         } else false;
 
-        // For symlinks, require target to stay within allowed areas.
-        if (existing_is_symlink) {
-            const resolved = resolved_target.?;
-            if (!isResolvedPathAllowed(allocator, resolved, ws_path, self.allowed_paths)) {
-                return ToolResult.fail("Path is outside allowed areas");
+        if (resolved_target) |resolved| {
+            // On Windows, avoid readLink-based probing (can return non-mapped NTSTATUS
+            // on regular files). Validate existing target via resolved path directly.
+            if (comptime builtin.os.tag == .windows) {
+                if (!isResolvedPathAllowed(allocator, resolved, ws_path, self.allowed_paths)) {
+                    return ToolResult.fail("Path is outside allowed areas");
+                }
+            } else if (existing_is_symlink) {
+                // For symlinks, require target to stay within allowed areas.
+                if (!isResolvedPathAllowed(allocator, resolved, ws_path, self.allowed_paths)) {
+                    return ToolResult.fail("Path is outside allowed areas");
+                }
             }
         }
 
