@@ -148,6 +148,25 @@ pub fn saveTelegramUpdateOffset(
     };
 }
 
+/// Persist candidate Telegram offset only when it advanced beyond the last
+/// persisted value. On write failure, keeps watermark unchanged so the caller
+/// retries on the next loop iteration.
+pub fn persistTelegramUpdateOffsetIfAdvanced(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    account_id: []const u8,
+    bot_token: []const u8,
+    persisted_update_id: *i64,
+    candidate_update_id: i64,
+) void {
+    if (candidate_update_id <= persisted_update_id.*) return;
+    saveTelegramUpdateOffset(allocator, config, account_id, bot_token, candidate_update_id) catch |err| {
+        log.warn("failed to persist telegram update offset: {}", .{err});
+        return;
+    };
+    persisted_update_id.* = candidate_update_id;
+}
+
 fn signalGroupPeerId(reply_target: ?[]const u8) []const u8 {
     const target = reply_target orelse "unknown";
     if (std.mem.startsWith(u8, target, signal.GROUP_TARGET_PREFIX)) {
@@ -415,18 +434,14 @@ pub fn runTelegramLoop(
         }
 
         if (tg_ptr.persistableUpdateOffset()) |persistable_update_id| {
-            if (persistable_update_id > persisted_update_id) {
-                const save_ok = blk: {
-                    saveTelegramUpdateOffset(allocator, config, tg_ptr.account_id, tg_ptr.bot_token, persistable_update_id) catch |err| {
-                        log.warn("failed to persist telegram update offset: {}", .{err});
-                        break :blk false;
-                    };
-                    break :blk true;
-                };
-                if (save_ok) {
-                    persisted_update_id = persistable_update_id;
-                }
-            }
+            persistTelegramUpdateOffsetIfAdvanced(
+                allocator,
+                config,
+                tg_ptr.account_id,
+                tg_ptr.bot_token,
+                &persisted_update_id,
+                persistable_update_id,
+            );
         }
 
         // Periodic session eviction
@@ -949,4 +964,56 @@ test "telegram update offset store treats legacy payload without bot_id as stale
 
     const restored = loadTelegramUpdateOffset(allocator, &cfg, "default", "33333:test-token-c");
     try std.testing.expect(restored == null);
+}
+
+test "telegram offset persistence helper retries after write failure" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fs.path.join(allocator, &.{ base, "config.json" });
+    defer allocator.free(config_path);
+
+    const cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+
+    const blocked_state_path = try std.fs.path.join(allocator, &.{ base, "state" });
+    defer allocator.free(blocked_state_path);
+
+    {
+        const blocked_state_file = try std.fs.createFileAbsolute(blocked_state_path, .{});
+        blocked_state_file.close();
+    }
+
+    var persisted_update_id: i64 = 100;
+    persistTelegramUpdateOffsetIfAdvanced(
+        allocator,
+        &cfg,
+        "main",
+        "12345:test-token",
+        &persisted_update_id,
+        101,
+    );
+    try std.testing.expectEqual(@as(i64, 100), persisted_update_id);
+    try std.testing.expect(loadTelegramUpdateOffset(allocator, &cfg, "main", "12345:test-token") == null);
+
+    try std.fs.deleteFileAbsolute(blocked_state_path);
+
+    persistTelegramUpdateOffsetIfAdvanced(
+        allocator,
+        &cfg,
+        "main",
+        "12345:test-token",
+        &persisted_update_id,
+        101,
+    );
+    try std.testing.expectEqual(@as(i64, 101), persisted_update_id);
+    const restored = loadTelegramUpdateOffset(allocator, &cfg, "main", "12345:test-token");
+    try std.testing.expectEqual(@as(?i64, 101), restored);
 }
