@@ -112,7 +112,40 @@ nullclaw migrate openclaw --dry-run
 nullclaw migrate openclaw
 ```
 
+### Sentry Error Tracking (Optional)
+
+nullclaw now supports native Sentry-Zig integration via environment variables.
+
+```bash
+export NULLCLAW_SENTRY_DSN="https://PUBLIC_KEY@o0.ingest.sentry.io/PROJECT_ID"
+export NULLCLAW_SENTRY_ENVIRONMENT="production"
+export NULLCLAW_SENTRY_RELEASE="nullclaw@2026.2.25"
+export NULLCLAW_SENTRY_SAMPLE_RATE="1.0"
+export NULLCLAW_SENTRY_TRACES_SAMPLE_RATE="0.1"
+
+nullclaw gateway
+```
+
+Supported variables:
+- `NULLCLAW_SENTRY_DSN` (required to enable Sentry)
+- `NULLCLAW_SENTRY_ENVIRONMENT`
+- `NULLCLAW_SENTRY_RELEASE`
+- `NULLCLAW_SENTRY_SAMPLE_RATE`
+- `NULLCLAW_SENTRY_TRACES_SAMPLE_RATE`
+- `NULLCLAW_SENTRY_DEBUG` (`true/false`)
+- `NULLCLAW_SENTRY_AUTO_SESSION` (`true/false`)
+- `NULLCLAW_SENTRY_INSTALL_SIGNAL_HANDLERS` (`true/false`)
+- `NULLCLAW_SENTRY_STARTUP_EVENT` (`true/false`)
+
 > **Dev fallback (no global install):** prefix commands with `zig-out/bin/` (example: `zig-out/bin/nullclaw status`).
+
+## Edge MVP (Hybrid Host + WASM Logic)
+
+If you want edge deployment (Cloudflare Worker) with Telegram + OpenAI while keeping agent policy in WASM, see:
+
+`examples/edge/cloudflare-worker/`
+
+This pattern keeps networking/secrets in the edge host and lets you swap/update logic by replacing a tiny Zig WASM module.
 
 ## Architecture
 

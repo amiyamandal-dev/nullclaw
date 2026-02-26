@@ -25,6 +25,7 @@ pub const capabilities = @import("capabilities.zig");
 pub const config_mutator = @import("config_mutator.zig");
 pub const service = @import("service.zig");
 pub const daemon = @import("daemon.zig");
+pub const sentry_runtime = @import("sentry_runtime.zig");
 pub const channel_loop = @import("channel_loop.zig");
 pub const channel_manager = @import("channel_manager.zig");
 pub const channel_catalog = @import("channel_catalog.zig");
