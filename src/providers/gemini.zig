@@ -7,6 +7,7 @@ const config_types = @import("../config_types.zig");
 const Provider = root.Provider;
 const ChatRequest = root.ChatRequest;
 const ChatResponse = root.ChatResponse;
+const OAUTH_REFRESH_TIMEOUT_SECS: u64 = 20;
 
 fn parseExpiresIn(v: std.json.Value) ?i64 {
     return switch (v) {
@@ -199,7 +200,13 @@ pub fn refreshOAuthToken(allocator: std.mem.Allocator, refresh_token: []const u8
     const url = "https://oauth2.googleapis.com/token";
     const headers = &[_][]const u8{"Content-Type: application/x-www-form-urlencoded"};
 
-    const resp_body = root.curlPost(allocator, url, body, headers) catch return error.RefreshFailed;
+    const resp_body = root.curlPostTimed(
+        allocator,
+        url,
+        body,
+        headers,
+        OAUTH_REFRESH_TIMEOUT_SECS,
+    ) catch return error.RefreshFailed;
     defer allocator.free(resp_body);
 
     return parseRefreshResponse(allocator, resp_body) orelse return error.RefreshFailed;
@@ -236,6 +243,10 @@ pub fn writeCredentialsJson(allocator: std.mem.Allocator, creds: GeminiCliCreden
 /// If token is expired but refresh_token is available, attempts to refresh.
 /// Returns null on any error (file not found, parse failure, refresh failed, etc.).
 pub fn tryLoadGeminiCliToken(allocator: std.mem.Allocator) ?GeminiCliCredentials {
+    // Keep tests deterministic and side-effect free: never read or write real
+    // ~/.gemini credentials while running under std.testing.
+    if (@import("builtin").is_test) return null;
+
     const home = platform.getHomeDir(allocator) catch return null;
     defer allocator.free(home);
 
@@ -1268,17 +1279,11 @@ test "GeminiCliCredentials isExpired with 5-min buffer edge case" {
     try std.testing.expect(!creds_valid.isExpired());
 }
 
-test "tryLoadGeminiCliToken returns null for nonexistent path" {
-    // Unless the user has ~/.gemini/oauth_creds.json, this returns null.
-    // In CI / test environments it should always be null.
-    // We can't control HOME here, but the function should not crash.
+test "tryLoadGeminiCliToken is side-effect free in test mode" {
+    // In test mode we always return null to avoid touching real ~/.gemini
+    // credentials on developer machines.
     const result = tryLoadGeminiCliToken(std.testing.allocator);
-    if (result) |creds| {
-        // If credentials were found (developer machine), they should be valid
-        std.testing.allocator.free(creds.access_token);
-        if (creds.refresh_token) |rt| std.testing.allocator.free(rt);
-    }
-    // Either way, the function should not crash — this test validates robustness.
+    try std.testing.expect(result == null);
 }
 
 test "parseCredentialsJson valid JSON with all fields" {
