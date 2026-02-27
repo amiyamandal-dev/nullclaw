@@ -563,6 +563,30 @@ test "buildSystemPrompt injects HEARTBEAT.md when present" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "heartbeat-check-item") != null);
 }
 
+test "buildSystemPrompt injects IDENTITY.md when present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("IDENTITY.md", .{});
+        defer f.close();
+        try f.writeAll("- **Name:** identity-test-bot");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const prompt = try buildSystemPrompt(std.testing.allocator, .{
+        .workspace_dir = workspace,
+        .model_name = "test-model",
+        .tools = &.{},
+    });
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "### IDENTITY.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "identity-test-bot") != null);
+}
+
 test "workspacePromptFingerprint is stable when files are unchanged" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -650,6 +674,31 @@ test "workspacePromptFingerprint changes when HEARTBEAT.md changes" {
         const f = try tmp.dir.createFile("HEARTBEAT.md", .{ .truncate = true });
         defer f.close();
         try f.writeAll("- check-2");
+    }
+
+    const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
+    try std.testing.expect(before != after);
+}
+
+test "workspacePromptFingerprint changes when IDENTITY.md changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("IDENTITY.md", .{});
+        defer f.close();
+        try f.writeAll("- **Name:** v1");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const before = try workspacePromptFingerprint(std.testing.allocator, workspace);
+
+    {
+        const f = try tmp.dir.createFile("IDENTITY.md", .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("- **Name:** v2");
     }
 
     const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
