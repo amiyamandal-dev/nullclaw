@@ -24,8 +24,11 @@ const VENDORED_SQLITE_HASHES = [_]VendoredFileHash{
 fn verifyVendoredSqliteHashes(b: *std.Build) !void {
     const max_vendor_file_size = 16 * 1024 * 1024;
     for (VENDORED_SQLITE_HASHES) |entry| {
-        const bytes = std.fs.cwd().readFileAlloc(b.allocator, entry.path, max_vendor_file_size) catch |err| {
-            std.log.err("failed to read {s}: {s}", .{ entry.path, @errorName(err) });
+        const file_path = b.pathFromRoot(entry.path);
+        defer b.allocator.free(file_path);
+
+        const bytes = std.fs.cwd().readFileAlloc(b.allocator, file_path, max_vendor_file_size) catch |err| {
+            std.log.err("failed to read {s}: {s}", .{ file_path, @errorName(err) });
             return err;
         };
         defer b.allocator.free(bytes);
