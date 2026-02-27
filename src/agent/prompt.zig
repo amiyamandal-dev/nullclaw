@@ -539,6 +539,30 @@ test "buildSystemPrompt injects BOOTSTRAP.md when present" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "bootstrap-welcome-line") != null);
 }
 
+test "buildSystemPrompt injects HEARTBEAT.md when present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("HEARTBEAT.md", .{});
+        defer f.close();
+        try f.writeAll("- heartbeat-check-item");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const prompt = try buildSystemPrompt(std.testing.allocator, .{
+        .workspace_dir = workspace,
+        .model_name = "test-model",
+        .tools = &.{},
+    });
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "### HEARTBEAT.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "heartbeat-check-item") != null);
+}
+
 test "workspacePromptFingerprint is stable when files are unchanged" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -601,6 +625,31 @@ test "workspacePromptFingerprint changes when BOOTSTRAP.md changes" {
         const f = try tmp.dir.createFile("BOOTSTRAP.md", .{ .truncate = true });
         defer f.close();
         try f.writeAll("bootstrap-v2-updated");
+    }
+
+    const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
+    try std.testing.expect(before != after);
+}
+
+test "workspacePromptFingerprint changes when HEARTBEAT.md changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("HEARTBEAT.md", .{});
+        defer f.close();
+        try f.writeAll("- check-1");
+    }
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    const before = try workspacePromptFingerprint(std.testing.allocator, workspace);
+
+    {
+        const f = try tmp.dir.createFile("HEARTBEAT.md", .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("- check-2");
     }
 
     const after = try workspacePromptFingerprint(std.testing.allocator, workspace);
