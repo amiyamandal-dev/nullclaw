@@ -1,23 +1,9 @@
 services:
-  agent:
-    build: .
-    image: nullclaw:latest
-    profiles: ["agent"]
-    stdin_open: true
-    tty: true
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - nullclaw-data:/root/.nullclaw
-    networks:
-      - nullclaw
-    restart: unless-stopped
+  # ── nullclaw ───────────────────────────────────────────────────
 
   gateway:
     build: .
     image: nullclaw:latest
-    profiles: ["gateway"]
     ports:
       - "8080:8080"
     env_file:
@@ -27,6 +13,11 @@ services:
       - nullclaw-data:/root/.nullclaw
     networks:
       - nullclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -34,11 +25,10 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Infrastructure dependencies ────────────────────────────────
+  # ── Infrastructure ─────────────────────────────────────────────
 
   postgres:
     image: postgres:16-alpine
-    profiles: ["postgres"]
     expose:
       - "5432"
     environment:
@@ -58,7 +48,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    profiles: ["redis"]
     expose:
       - "6379"
     volumes:
@@ -74,7 +63,6 @@ services:
 
   neo4j:
     image: neo4j:5-community
-    profiles: ["neo4j"]
     expose:
       - "7474"
       - "7687"
@@ -93,7 +81,6 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.8.4
-    profiles: ["qdrant"]
     expose:
       - "6333"
       - "6334"
@@ -108,11 +95,10 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Observability stack ────────────────────────────────────────
+  # ── Observability ──────────────────────────────────────────────
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.96.0
-    profiles: ["monitoring"]
     ports:
       - "4318:4318"
     expose:
@@ -125,7 +111,6 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.51.0
-    profiles: ["monitoring"]
     expose:
       - "9090"
     volumes:
@@ -137,7 +122,6 @@ services:
 
   tempo:
     image: grafana/tempo:2.4.1
-    profiles: ["monitoring"]
     expose:
       - "3200"
       - "4318"
@@ -151,7 +135,6 @@ services:
 
   grafana:
     image: grafana/grafana:10.4.1
-    profiles: ["monitoring"]
     ports:
       - "3001:3000"
     volumes:
