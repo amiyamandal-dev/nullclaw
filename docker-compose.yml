@@ -10,6 +10,8 @@ services:
         required: false
     volumes:
       - nullclaw-data:/root/.nullclaw
+    networks:
+      - nullclaw
     restart: unless-stopped
 
   gateway:
@@ -23,6 +25,8 @@ services:
         required: false
     volumes:
       - nullclaw-data:/root/.nullclaw
+    networks:
+      - nullclaw
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -30,5 +34,148 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── Infrastructure dependencies ────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: nullclaw
+      POSTGRES_PASSWORD: nullclaw
+      POSTGRES_DB: nullclaw
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - nullclaw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nullclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - nullclaw
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["neo4j"]
+    expose:
+      - "7474"
+      - "7687"
+    environment:
+      NEO4J_AUTH: neo4j/nullclaw
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - nullclaw
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p nullclaw 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.8.4
+    profiles: ["qdrant"]
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - nullclaw
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Observability stack ────────────────────────────────────────
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    profiles: ["monitoring"]
+    ports:
+      - "4318:4318"
+    expose:
+      - "8889"
+    volumes:
+      - ./monitoring/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - nullclaw
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    profiles: ["monitoring"]
+    expose:
+      - "9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - nullclaw
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    profiles: ["monitoring"]
+    expose:
+      - "3200"
+      - "4318"
+    volumes:
+      - ./monitoring/tempo.yml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    networks:
+      - nullclaw
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    profiles: ["monitoring"]
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: nullclaw
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    networks:
+      - nullclaw
+    restart: unless-stopped
+
+networks:
+  nullclaw:
+    driver: bridge
+
 volumes:
   nullclaw-data:
+  postgres-data:
+  redis-data:
+  neo4j-data:
+  qdrant-data:
+  prometheus-data:
+  tempo-data:
+  grafana-data:

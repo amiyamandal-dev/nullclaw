@@ -1171,7 +1171,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     defer cfg.deinit();
 
     // ── Step 1: Provider selection ──
-    try out.writeAll("  Step 1/8: Select a provider\n");
+    try out.writeAll("  Step 1/9: Select a provider\n");
     for (known_providers, 0..) |p, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, p.label });
     }
@@ -1187,7 +1187,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
 
     // ── Step 2: API key ──
     const env_hint = selected_provider.env_var;
-    try out.print("  Step 2/8: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
+    try out.print("  Step 2/9: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
     const api_key_input = prompt(out, &input_buf, "", "") orelse {
         try out.writeAll("\n  Aborted.\n");
         try out.flush();
@@ -1204,7 +1204,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
 
     // ── Step 3: Model (with live fetching) ──
-    try out.writeAll("  Step 3/8: Select a model\n");
+    try out.writeAll("  Step 3/9: Select a model\n");
     try out.writeAll("  Fetching available models...\n");
     try out.flush();
 
@@ -1252,7 +1252,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     // ── Step 4: Memory backend ──
     const backends = try selectableBackendsForWizard(allocator);
     defer allocator.free(backends);
-    try out.writeAll("  Step 4/8: Memory backend\n");
+    try out.writeAll("  Step 4/9: Memory backend\n");
     for (backends, 0..) |b, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, b.label });
     }
@@ -1268,7 +1268,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{backends[mem_idx].label});
 
     // ── Step 5: Tunnel ──
-    try out.writeAll("  Step 5/8: Tunnel\n");
+    try out.writeAll("  Step 5/9: Tunnel\n");
     try out.writeAll("    [1] none\n    [2] cloudflare\n    [3] ngrok\n    [4] tailscale\n");
     try out.writeAll("  Choice [1]: ");
     const tunnel_idx = promptChoice(out, &input_buf, tunnel_options.len, 0) orelse {
@@ -1280,7 +1280,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{tunnel_options[tunnel_idx]});
 
     // ── Step 6: Autonomy level ──
-    try out.writeAll("  Step 6/8: Autonomy level\n");
+    try out.writeAll("  Step 6/9: Autonomy level\n");
     try out.writeAll("    [1] supervised\n    [2] autonomous\n    [3] fully_autonomous\n");
     try out.writeAll("  Choice [1]: ");
     const autonomy_idx = promptChoice(out, &input_buf, autonomy_options.len, 0) orelse {
@@ -1315,7 +1315,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{autonomy_options[autonomy_idx]});
 
     // ── Step 7: Channels ──
-    try out.writeAll("  Step 7/8: Configure channels now? [Y/n]: ");
+    try out.writeAll("  Step 7/9: Configure channels now? [Y/n]: ");
     const chan_input = prompt(out, &input_buf, "", "y") orelse {
         try out.writeAll("\n  Aborted.\n");
         try out.flush();
@@ -1328,9 +1328,45 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         try out.writeAll("  -> Skipped (CLI enabled by default)\n\n");
     }
 
-    // ── Step 8: Workspace path ──
+    // ── Step 8: Diagnostics / Monitoring ──
+    try out.writeAll("  Step 8/9: Diagnostics backend\n");
+    try out.writeAll("    [1] none (no telemetry)\n");
+    try out.writeAll("    [2] log (structured stderr logging)\n");
+    try out.writeAll("    [3] otel (OpenTelemetry -> Grafana stack)\n");
+    try out.writeAll("    [4] file (JSONL event log)\n");
+    try out.writeAll("  Choice [1]: ");
+    const diag_options = [_][]const u8{ "none", "log", "otel", "file" };
+    const diag_idx = promptChoice(out, &input_buf, diag_options.len, 0) orelse {
+        try out.writeAll("\n  Aborted.\n");
+        try out.flush();
+        return;
+    };
+    cfg.diagnostics.backend = diag_options[diag_idx];
+    if (std.mem.eql(u8, diag_options[diag_idx], "otel")) {
+        try out.writeAll("  OTLP endpoint [http://localhost:4318]: ");
+        const otel_ep = prompt(out, &input_buf, "", "http://localhost:4318") orelse {
+            try out.writeAll("\n  Aborted.\n");
+            try out.flush();
+            return;
+        };
+        cfg.diagnostics.otel_endpoint = try cfg.allocator.dupe(u8, otel_ep);
+        try out.writeAll("  Service name [nullclaw]: ");
+        const otel_svc = prompt(out, &input_buf, "", "nullclaw") orelse {
+            try out.writeAll("\n  Aborted.\n");
+            try out.flush();
+            return;
+        };
+        cfg.diagnostics.otel_service_name = try cfg.allocator.dupe(u8, otel_svc);
+        cfg.diagnostics.log_tool_calls = true;
+        cfg.diagnostics.log_message_receipts = true;
+        try out.writeAll("  -> otel (start monitoring: docker compose --profile monitoring up -d)\n\n");
+    } else {
+        try out.print("  -> {s}\n\n", .{diag_options[diag_idx]});
+    }
+
+    // ── Step 9: Workspace path ──
     const default_workspace = try getDefaultWorkspace(allocator);
-    try out.print("  Step 8/8: Workspace path [{s}]: ", .{default_workspace});
+    try out.print("  Step 9/9: Workspace path [{s}]: ", .{default_workspace});
     const ws_input = prompt(out, &input_buf, "", default_workspace) orelse {
         try out.writeAll("\n  Aborted.\n");
         try out.flush();
@@ -1369,6 +1405,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "from environment"});
     try out.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
     try out.print("  [OK] Tunnel:     {s}\n", .{cfg.tunnel.provider});
+    try out.print("  [OK] Diagnostics:{s}\n", .{cfg.diagnostics.backend});
     try out.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
     try out.print("  [OK] Config:     {s}\n", .{cfg.config_path});
     try out.writeAll("\n  Next steps:\n");
