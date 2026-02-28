@@ -85,7 +85,12 @@ pub fn parseXmlToolCalls(
         calls.deinit(allocator);
     }
 
-    var remaining = response;
+    // Normalize response: some models (e.g. DeepSeek) emit non-standard closing
+    // tags or repeat <tool_call> tags. Pre-process to canonical form.
+    const normalized = try normalizeToolCallTags(allocator, response);
+    defer if (normalized.ptr != response.ptr) allocator.free(normalized);
+
+    var remaining = normalized;
 
     while (std.mem.indexOf(u8, remaining, "<tool_call>")) |start| {
         // Text before the tag
@@ -451,6 +456,82 @@ pub fn buildAssistantHistoryWithToolCalls(
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────
+
+/// Normalize non-standard tool call tags emitted by some models (e.g. DeepSeek).
+///
+/// Handles:
+/// - Repeated `<tool_call>` opening tags (collapsed to one)
+/// - Non-standard closing tags like DeepSeek's `</｜DSML｜invoke>`,
+///   `</｜DSML｜function_calls>`, or generic `</invoke>` (replaced with `</tool_call>`)
+///
+/// Returns the original slice unchanged if no normalization is needed (no allocation).
+fn normalizeToolCallTags(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    // Known alternative closing tags emitted by various models.
+    const alt_close_tags = [_][]const u8{
+        "</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>", // </｜DSML｜invoke>
+        "</\xef\xbd\x9cDSML\xef\xbd\x9cfunction_calls>", // </｜DSML｜function_calls>
+        "</invoke>",
+        "</function_calls>",
+    };
+
+    // Quick check: does input need normalization at all?
+    const has_repeated = std.mem.indexOf(u8, input, "<tool_call><tool_call>") != null or
+        std.mem.indexOf(u8, input, "<tool_call>\n<tool_call>") != null;
+    var has_alt_close = false;
+    for (alt_close_tags) |tag| {
+        if (std.mem.indexOf(u8, input, tag) != null) {
+            has_alt_close = true;
+            break;
+        }
+    }
+    if (!has_repeated and !has_alt_close) return input;
+
+    // Build normalized output
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.ensureTotalCapacity(allocator, input.len);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        // Collapse consecutive <tool_call> tags into one
+        if (i + 11 <= input.len and std.mem.eql(u8, input[i .. i + 11], "<tool_call>")) {
+            try buf.appendSlice(allocator, "<tool_call>");
+            i += 11;
+            // Skip any further <tool_call> tags (with optional whitespace between)
+            while (i < input.len) {
+                // Skip whitespace
+                if (i < input.len and (input[i] == ' ' or input[i] == '\t' or input[i] == '\r' or input[i] == '\n')) {
+                    i += 1;
+                    continue;
+                }
+                // Skip another <tool_call>
+                if (i + 11 <= input.len and std.mem.eql(u8, input[i .. i + 11], "<tool_call>")) {
+                    i += 11;
+                    continue;
+                }
+                break;
+            }
+            continue;
+        }
+
+        // Replace alternative closing tags with </tool_call>
+        var replaced = false;
+        for (alt_close_tags) |tag| {
+            if (i + tag.len <= input.len and std.mem.eql(u8, input[i .. i + tag.len], tag)) {
+                try buf.appendSlice(allocator, "</tool_call>");
+                i += tag.len;
+                replaced = true;
+                break;
+            }
+        }
+        if (replaced) continue;
+
+        try buf.append(allocator, input[i]);
+        i += 1;
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
 
 /// Find the first JSON object `{...}` in a string, handling nesting.
 fn extractJsonObject(input: []const u8) ?[]const u8 {
@@ -1878,6 +1959,55 @@ test "parseXmlToolCalls function-tag fallback when JSON has braces in value" {
     try std.testing.expectEqual(@as(usize, 1), result.calls.len);
     try std.testing.expectEqualStrings("shell", result.calls[0].name);
     try std.testing.expect(std.mem.indexOf(u8, result.calls[0].arguments_json, "echo {hello}") != null);
+}
+
+// ── normalizeToolCallTags / DeepSeek compatibility tests ─────────
+
+test "parseXmlToolCalls handles DeepSeek DSML closing tags" {
+    const allocator = std.testing.allocator;
+    // DeepSeek emits repeated <tool_call> and closes with </｜DSML｜invoke>
+    const response = "<tool_call>\n<tool_call>\n<tool_call>\n" ++
+        "{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}\n" ++
+        "</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>\n" ++
+        "</\xef\xbd\x9cDSML\xef\xbd\x9cfunction_calls>";
+    const result = try parseXmlToolCalls(allocator, response);
+    defer {
+        if (result.text.len > 0) allocator.free(result.text);
+        for (result.calls) |call| {
+            allocator.free(call.name);
+            allocator.free(call.arguments_json);
+        }
+        allocator.free(result.calls);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.calls.len);
+    try std.testing.expectEqualStrings("shell", result.calls[0].name);
+}
+
+test "normalizeToolCallTags returns original when no normalization needed" {
+    const allocator = std.testing.allocator;
+    const input = "<tool_call>\n{\"name\":\"shell\"}\n</tool_call>";
+    const result = try normalizeToolCallTags(allocator, input);
+    // Should return original pointer — no allocation
+    try std.testing.expectEqual(input.ptr, result.ptr);
+}
+
+test "normalizeToolCallTags collapses repeated opening tags" {
+    const allocator = std.testing.allocator;
+    const input = "<tool_call>\n<tool_call>\n<tool_call>\n{\"name\":\"shell\"}\n</tool_call>";
+    const result = try normalizeToolCallTags(allocator, input);
+    defer allocator.free(result);
+    // Should have exactly one <tool_call>
+    try std.testing.expect(std.mem.indexOf(u8, result, "<tool_call>") != null);
+    const first = std.mem.indexOf(u8, result, "<tool_call>").?;
+    try std.testing.expect(std.mem.indexOf(u8, result[first + 11 ..], "<tool_call>") == null);
+}
+
+test "normalizeToolCallTags replaces DSML invoke closing tag" {
+    const allocator = std.testing.allocator;
+    const input = "<tool_call>\n{}\n</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>";
+    const result = try normalizeToolCallTags(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "</tool_call>") != null);
 }
 
 // ── buildAssistantHistoryWithToolCalls tests ─────────────────────

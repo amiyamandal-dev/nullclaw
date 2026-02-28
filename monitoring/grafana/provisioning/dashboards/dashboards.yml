@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: nullclaw
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false

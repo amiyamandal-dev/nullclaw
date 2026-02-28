@@ -201,6 +201,7 @@ const EngineSelection = struct {
     enable_memory_lucid: bool = false,
     enable_memory_redis: bool = false,
     enable_memory_lancedb: bool = false,
+    enable_memory_neo4j: bool = false,
     enable_postgres: bool = false,
 
     fn enableBase(self: *EngineSelection) void {
@@ -215,6 +216,7 @@ const EngineSelection = struct {
         self.enable_memory_lucid = true;
         self.enable_memory_redis = true;
         self.enable_memory_lancedb = true;
+        self.enable_memory_neo4j = true;
         self.enable_postgres = true;
     }
 
@@ -232,6 +234,7 @@ const EngineSelection = struct {
             self.enable_memory_lucid or
             self.enable_memory_redis or
             self.enable_memory_lancedb or
+            self.enable_memory_neo4j or
             self.enable_postgres;
     }
 };
@@ -281,6 +284,8 @@ fn parseEnginesOption(raw: []const u8) !EngineSelection {
             selection.enable_memory_redis = true;
         } else if (std.mem.eql(u8, token, "lancedb")) {
             selection.enable_memory_lancedb = true;
+        } else if (std.mem.eql(u8, token, "neo4j")) {
+            selection.enable_memory_neo4j = true;
         } else if (std.mem.eql(u8, token, "postgres")) {
             selection.enable_postgres = true;
         } else {
@@ -341,6 +346,7 @@ pub fn build(b: *std.Build) void {
     const enable_memory_lucid = engines.enable_memory_lucid;
     const enable_memory_redis = engines.enable_memory_redis;
     const enable_memory_lancedb = engines.enable_memory_lancedb;
+    const enable_memory_neo4j = engines.enable_memory_neo4j;
     const enable_postgres = engines.enable_postgres;
     const enable_channel_cli = channels.enable_channel_cli;
     const enable_channel_telegram = channels.enable_channel_telegram;
@@ -393,6 +399,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_memory_lucid", effective_enable_memory_lucid);
     build_options.addOption(bool, "enable_memory_redis", enable_memory_redis);
     build_options.addOption(bool, "enable_memory_lancedb", effective_enable_memory_lancedb);
+    build_options.addOption(bool, "enable_memory_neo4j", enable_memory_neo4j);
     build_options.addOption(bool, "enable_channel_cli", enable_channel_cli);
     build_options.addOption(bool, "enable_channel_telegram", enable_channel_telegram);
     build_options.addOption(bool, "enable_channel_discord", enable_channel_discord);

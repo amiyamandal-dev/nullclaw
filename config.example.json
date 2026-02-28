@@ -172,6 +172,18 @@
     "require_pairing": true
   },
 
+  "diagnostics": {
+    "backend": "otel",
+    "otel": {
+      "endpoint": "http://localhost:4318",
+      "service_name": "nullclaw"
+    },
+    "log_tool_calls": true,
+    "log_message_receipts": true,
+    "log_message_payloads": false,
+    "log_llm_io": false
+  },
+
   "security": {
     "sandbox": {
       "backend": "auto"

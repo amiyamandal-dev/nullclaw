@@ -27,6 +27,9 @@ pub const lancedb = if (build_options.enable_memory_lancedb) @import("engines/la
     pub const LanceDbMemory = struct {};
 };
 pub const api = @import("engines/api.zig");
+pub const neo4j = if (build_options.enable_memory_neo4j) @import("engines/neo4j.zig") else struct {
+    pub const Neo4jMemory = struct {};
+};
 pub const registry = @import("engines/registry.zig");
 
 // retrieval/ (Layer B: Retrieval Engine)
@@ -72,6 +75,7 @@ pub const PostgresMemory = if (build_options.enable_postgres) postgres.PostgresM
 pub const RedisMemory = redis.RedisMemory;
 pub const LanceDbMemory = lancedb.LanceDbMemory;
 pub const ApiMemory = api.ApiMemory;
+pub const Neo4jMemory = neo4j.Neo4jMemory;
 pub const ResponseCache = cache.ResponseCache;
 pub const Chunk = chunker.Chunk;
 pub const chunkMarkdown = chunker.chunkMarkdown;
@@ -680,7 +684,8 @@ pub fn initRuntime(
     const pg_cfg: ?config_types.MemoryPostgresConfig = if (std.mem.eql(u8, config.backend, "postgres")) config.postgres else null;
     const redis_cfg: ?config_types.MemoryRedisConfig = if (std.mem.eql(u8, config.backend, "redis")) config.redis else null;
     const api_cfg: ?config_types.MemoryApiConfig = if (std.mem.eql(u8, config.backend, "api")) config.api else null;
-    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg) catch |err| {
+    const neo4j_cfg: ?config_types.MemoryNeo4jConfig = if (std.mem.eql(u8, config.backend, "neo4j")) config.neo4j else null;
+    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg, neo4j_cfg) catch |err| {
         log.warn("memory path resolution failed for backend '{s}': {}", .{ config.backend, err });
         return null;
     };
