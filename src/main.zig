@@ -1602,6 +1602,8 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
         .subagent_manager = &subagent_manager,
+        .google_client_id = if (config.google.enabled) config.google.client_id else null,
+        .google_client_secret = if (config.google.enabled) config.google.client_secret else null,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
@@ -1904,6 +1906,8 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
         .subagent_manager = &subagent_manager,
+        .google_client_id = if (config.google.enabled) config.google.client_id else null,
+        .google_client_secret = if (config.google.enabled) config.google.client_secret else null,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 

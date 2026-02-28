@@ -192,6 +192,7 @@ pub const OpenAiCodexProvider = struct {
                 OAUTH_TOKEN_URL,
                 OAUTH_CLIENT_ID,
                 rt,
+                null,
             );
 
             // Free old tokens

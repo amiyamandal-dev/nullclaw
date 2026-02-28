@@ -335,15 +335,23 @@ pub fn refreshAccessToken(
     token_url: []const u8,
     client_id: []const u8,
     refresh_token: []const u8,
+    client_secret: ?[]const u8,
 ) !OAuthToken {
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
 
-    const payload = try std.fmt.allocPrint(
-        allocator,
-        "grant_type=refresh_token&refresh_token={s}&client_id={s}",
-        .{ refresh_token, client_id },
-    );
+    const payload = if (client_secret) |cs|
+        try std.fmt.allocPrint(
+            allocator,
+            "grant_type=refresh_token&refresh_token={s}&client_id={s}&client_secret={s}",
+            .{ refresh_token, client_id, cs },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "grant_type=refresh_token&refresh_token={s}&client_id={s}",
+            .{ refresh_token, client_id },
+        );
     defer allocator.free(payload);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);

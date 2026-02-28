@@ -737,6 +737,14 @@ pub const GatewayConfig = struct {
     paired_tokens: []const []const u8 = &.{},
 };
 
+// ── Google config ───────────────────────────────────────────────
+
+pub const GoogleConfig = struct {
+    enabled: bool = false,
+    client_id: ?[]const u8 = null,
+    client_secret: ?[]const u8 = null,
+};
+
 // ── Composio config ─────────────────────────────────────────────
 
 pub const ComposioConfig = struct {

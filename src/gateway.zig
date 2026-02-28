@@ -2189,6 +2189,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     .allowed_paths = cfg.autonomy.allowed_paths,
                     .policy = if (sec_policy_opt) |*policy| policy else null,
                     .subagent_manager = subagent_manager_opt,
+                    .google_client_id = if (cfg.google.enabled) cfg.google.client_id else null,
+                    .google_client_secret = if (cfg.google.enabled) cfg.google.client_secret else null,
                 }) catch &.{};
 
                 const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;

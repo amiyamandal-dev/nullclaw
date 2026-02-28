@@ -278,6 +278,8 @@ pub const ChannelRuntime = struct {
             .allowed_paths = config.autonomy.allowed_paths,
             .policy = security_policy,
             .subagent_manager = subagent_manager,
+            .google_client_id = if (config.google.enabled) config.google.client_id else null,
+            .google_client_secret = if (config.google.enabled) config.google.client_secret else null,
         }) catch &.{};
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 

@@ -1339,6 +1339,21 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
         }
     }
 
+    // Google
+    if (root.get("google")) |g| {
+        if (g == .object) {
+            if (g.object.get("enabled")) |v| {
+                if (v == .bool) self.google.enabled = v.bool;
+            }
+            if (g.object.get("client_id")) |v| {
+                if (v == .string) self.google.client_id = try self.allocator.dupe(u8, v.string);
+            }
+            if (g.object.get("client_secret")) |v| {
+                if (v == .string) self.google.client_secret = try self.allocator.dupe(u8, v.string);
+            }
+        }
+    }
+
     // Composio
     if (root.get("composio")) |comp| {
         if (comp == .object) {

@@ -65,6 +65,9 @@ pub const delegate = @import("delegate.zig");
 pub const browser = @import("browser.zig");
 pub const image = @import("image.zig");
 pub const composio = @import("composio.zig");
+pub const google_auth = @import("google_auth.zig");
+pub const google_mail = @import("google_mail.zig");
+pub const google_calendar = @import("google_calendar.zig");
 pub const screenshot = @import("screenshot.zig");
 pub const browser_open = @import("browser_open.zig");
 pub const hardware_info = @import("hardware_info.zig");
@@ -268,6 +271,8 @@ pub fn allTools(
         browser_enabled: bool = false,
         screenshot_enabled: bool = false,
         composio_api_key: ?[]const u8 = null,
+        google_client_id: ?[]const u8 = null,
+        google_client_secret: ?[]const u8 = null,
         browser_open_domains: ?[]const []const u8 = null,
         hardware_boards: ?[]const []const u8 = null,
         mcp_tools: ?[]const Tool = null,
@@ -379,6 +384,16 @@ pub fn allTools(
         const ct = try allocator.create(composio.ComposioTool);
         ct.* = .{ .api_key = api_key, .entity_id = "default" };
         try list.append(allocator, ct.tool());
+    }
+
+    if (opts.google_client_id) |gid| {
+        const gmt = try allocator.create(google_mail.GoogleMailTool);
+        gmt.* = .{ .client_id = gid, .client_secret = opts.google_client_secret };
+        try list.append(allocator, gmt.tool());
+
+        const gct = try allocator.create(google_calendar.GoogleCalendarTool);
+        gct.* = .{ .client_id = gid, .client_secret = opts.google_client_secret };
+        try list.append(allocator, gct.tool());
     }
 
     if (opts.browser_open_domains) |domains| {
