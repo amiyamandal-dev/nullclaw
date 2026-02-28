@@ -13,6 +13,7 @@ const pg = if (build_options.enable_postgres) @import("postgres.zig") else struc
 const redis_engine = @import("redis.zig");
 const lancedb_engine = @import("lancedb.zig");
 const api_engine = @import("api.zig");
+const neo4j_engine = if (build_options.enable_memory_neo4j) @import("neo4j.zig") else struct {};
 
 // ── Capability & descriptor types ────────────────────────────────
 
@@ -42,6 +43,7 @@ pub const BackendConfig = struct {
     postgres_connect_timeout_secs: u32 = 30,
     redis_config: ?config_types.MemoryRedisConfig = null,
     api_config: ?config_types.MemoryApiConfig = null,
+    neo4j_config: ?config_types.MemoryNeo4jConfig = null,
 };
 
 pub const BackendInstance = struct {
@@ -163,6 +165,20 @@ const lancedb_backends = if (build_options.enable_memory_lancedb) [_]BackendDesc
     lancedb_backend,
 } else [0]BackendDescriptor{};
 
+const neo4j_backend = BackendDescriptor{
+    .name = "neo4j",
+    .label = "Neo4j — graph database memory store",
+    .auto_save_default = true,
+    .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = false, .supports_transactions = false, .supports_outbox = false },
+    .needs_db_path = false,
+    .needs_workspace = false,
+    .create = &createNeo4j,
+};
+
+const neo4j_backends = if (build_options.enable_memory_neo4j) [_]BackendDescriptor{
+    neo4j_backend,
+} else [0]BackendDescriptor{};
+
 const pg_backends = if (build_options.enable_postgres) [_]BackendDescriptor{.{
     .name = "postgres",
     .label = "PostgreSQL — remote/shared memory store",
@@ -173,7 +189,7 @@ const pg_backends = if (build_options.enable_postgres) [_]BackendDescriptor{.{
     .create = &createPostgres,
 }} else [0]BackendDescriptor{};
 
-pub const all = markdown_backends ++ api_backends ++ memory_backends ++ none_backends ++ sqlite_backends ++ lucid_backends ++ redis_backends ++ lancedb_backends ++ pg_backends;
+pub const all = markdown_backends ++ api_backends ++ memory_backends ++ none_backends ++ sqlite_backends ++ lucid_backends ++ redis_backends ++ lancedb_backends ++ neo4j_backends ++ pg_backends;
 pub const known_backend_names = [_][]const u8{
     "none",
     "markdown",
@@ -183,9 +199,10 @@ pub const known_backend_names = [_][]const u8{
     "lucid",
     "redis",
     "lancedb",
+    "neo4j",
     "postgres",
 };
-pub const known_backends_csv = "none, markdown, memory, api, sqlite, lucid, redis, lancedb, postgres";
+pub const known_backends_csv = "none, markdown, memory, api, sqlite, lucid, redis, lancedb, neo4j, postgres";
 
 // ── Lookup ───────────────────────────────────────────────────────
 
@@ -212,6 +229,7 @@ pub fn engineTokenForBackend(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "lucid")) return "lucid";
     if (std.mem.eql(u8, name, "redis")) return "redis";
     if (std.mem.eql(u8, name, "lancedb")) return "lancedb";
+    if (std.mem.eql(u8, name, "neo4j")) return "neo4j";
     if (std.mem.eql(u8, name, "postgres")) return "postgres";
     return null;
 }
@@ -240,6 +258,7 @@ pub fn resolvePaths(
     postgres_cfg: ?config_types.MemoryPostgresConfig,
     redis_cfg: ?config_types.MemoryRedisConfig,
     api_cfg: ?config_types.MemoryApiConfig,
+    neo4j_cfg: ?config_types.MemoryNeo4jConfig,
 ) !BackendConfig {
     const db_path: ?[*:0]const u8 = if (desc.needs_db_path)
         try std.fs.path.joinZ(allocator, &.{ workspace_dir, "memory.db" })
@@ -269,6 +288,7 @@ pub fn resolvePaths(
         .postgres_connect_timeout_secs = pg_connect_timeout_secs,
         .redis_config = redis_cfg,
         .api_config = api_cfg,
+        .neo4j_config = neo4j_cfg,
     };
 }
 
@@ -338,6 +358,26 @@ fn createApi(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInstance 
     return .{ .memory = impl_.memory(), .session_store = impl_.sessionStore() };
 }
 
+fn createNeo4j(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInstance {
+    if (!build_options.enable_memory_neo4j) return error.Neo4jNotEnabled;
+    const ncfg = cfg.neo4j_config orelse config_types.MemoryNeo4jConfig{};
+    const impl_ = try allocator.create(neo4j_engine.Neo4jMemory);
+    errdefer allocator.destroy(impl_);
+    impl_.* = try neo4j_engine.Neo4jMemory.init(allocator, .{
+        .url = ncfg.url,
+        .username = ncfg.username,
+        .password = ncfg.password,
+        .database = ncfg.database,
+        .node_label = ncfg.node_label,
+        .auto_relate_enabled = ncfg.auto_relate_enabled,
+        .auto_relate_top_k = ncfg.auto_relate_top_k,
+        .graph_enriched_recall = ncfg.graph_enriched_recall,
+        .graph_max_hops = ncfg.graph_max_hops,
+    });
+    impl_.owns_self = true;
+    return .{ .memory = impl_.memory(), .session_store = null };
+}
+
 fn createNone(allocator: std.mem.Allocator, _: BackendConfig) !BackendInstance {
     const impl_ = try allocator.create(root.NoneMemory);
     impl_.* = root.NoneMemory.init();
@@ -398,6 +438,7 @@ test "registry length" {
         @as(usize, @intFromBool(build_options.enable_memory_lucid)) +
         @as(usize, @intFromBool(build_options.enable_memory_redis)) +
         @as(usize, @intFromBool(build_options.enable_memory_lancedb)) +
+        @as(usize, @intFromBool(build_options.enable_memory_neo4j)) +
         @as(usize, @intFromBool(build_options.enable_postgres));
     try std.testing.expectEqual(expected, all.len);
 }
@@ -561,7 +602,7 @@ test "resolvePaths sqlite has db_path" {
         return;
     }
     const desc = findBackend("sqlite") orelse return error.TestUnexpectedResult;
-    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null);
+    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null, null);
     defer if (cfg.db_path) |p| std.testing.allocator.free(std.mem.span(p));
 
     try std.testing.expect(cfg.db_path != null);
@@ -576,7 +617,7 @@ test "resolvePaths markdown has no db_path" {
         return;
     }
     const desc = findBackend("markdown") orelse return error.TestUnexpectedResult;
-    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null);
+    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null, null);
 
     try std.testing.expect(cfg.db_path == null);
     try std.testing.expectEqualStrings("/tmp/ws", cfg.workspace_dir);
@@ -588,7 +629,7 @@ test "resolvePaths none has no db_path" {
         return;
     }
     const desc = findBackend("none") orelse return error.TestUnexpectedResult;
-    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null);
+    const cfg = try resolvePaths(std.testing.allocator, desc, "/tmp/ws", null, null, null, null);
 
     try std.testing.expect(cfg.db_path == null);
     try std.testing.expectEqualStrings("/tmp/ws", cfg.workspace_dir);
@@ -637,7 +678,7 @@ test "resolvePaths redis config is preserved" {
         .db_index = 2,
         .key_prefix = "agent",
         .ttl_seconds = 120,
-    }, null);
+    }, null, null);
 
     try std.testing.expect(cfg.redis_config != null);
     try std.testing.expectEqualStrings("10.10.10.10", cfg.redis_config.?.host);

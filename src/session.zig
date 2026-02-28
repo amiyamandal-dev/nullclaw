@@ -9,6 +9,7 @@
 //! sessions are processed in parallel.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const Config = @import("config.zig").Config;
 const Agent = @import("agent/root.zig").Agent;
@@ -81,6 +82,15 @@ pub const SessionManager = struct {
         response_cache: ?*memory_mod.cache.ResponseCache,
     ) SessionManager {
         tools_mod.bindMemoryTools(tools, mem);
+
+        // Bind Neo4j graph tools when backend is Neo4j.
+        if (build_options.enable_memory_neo4j) {
+            if (mem) |m| {
+                if (std.mem.eql(u8, m.name(), "neo4j")) {
+                    tools_mod.bindNeo4jGraphTools(tools, m.ptr);
+                }
+            }
+        }
 
         return .{
             .allocator = allocator,

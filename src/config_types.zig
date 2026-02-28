@@ -493,6 +493,7 @@ pub const MemoryConfig = struct {
     postgres: MemoryPostgresConfig = .{},
     redis: MemoryRedisConfig = .{},
     api: MemoryApiConfig = .{},
+    neo4j: MemoryNeo4jConfig = .{},
     retrieval_stages: MemoryRetrievalStagesConfig = .{},
     summarizer: MemorySummarizerConfig = .{},
 
@@ -699,6 +700,18 @@ pub const MemoryApiConfig = struct {
     api_key: []const u8 = "",
     timeout_ms: u32 = 10_000,
     namespace: []const u8 = "",
+};
+
+pub const MemoryNeo4jConfig = struct {
+    url: []const u8 = "http://192.168.0.223:7474",
+    username: []const u8 = "neo4j",
+    password: []const u8 = "qaz123!@#WSX",
+    database: []const u8 = "neo4j",
+    node_label: []const u8 = "Memory",
+    auto_relate_enabled: bool = true,
+    auto_relate_top_k: u8 = 3,
+    graph_enriched_recall: bool = true,
+    graph_max_hops: u8 = 1,
 };
 
 pub const MemoryRetrievalStagesConfig = struct {

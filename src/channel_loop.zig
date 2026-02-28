@@ -5,6 +5,7 @@
 //! daemon supervisor).
 
 const std = @import("std");
+const build_options = @import("build_options");
 const Config = @import("config.zig").Config;
 const telegram = @import("channels/telegram.zig");
 const session_mod = @import("session.zig");
@@ -318,6 +319,14 @@ pub const ChannelRuntime = struct {
         if (self.mem_rt) |*rt| {
             self.session_mgr.mem_rt = rt;
             tools_mod.bindMemoryRuntime(tools, rt);
+        }
+        // Bind Neo4j graph tools when backend is Neo4j.
+        if (build_options.enable_memory_neo4j) {
+            if (self.session_mgr.mem) |m| {
+                if (std.mem.eql(u8, m.name(), "neo4j")) {
+                    tools_mod.bindNeo4jGraphTools(tools, m.ptr);
+                }
+            }
         }
         return self;
     }

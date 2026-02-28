@@ -1,9 +1,13 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const memory_mod = @import("../memory/root.zig");
 const multimodal = @import("../multimodal.zig");
 const Memory = memory_mod.Memory;
 const MemoryEntry = memory_mod.MemoryEntry;
 const MemoryRuntime = memory_mod.MemoryRuntime;
+const neo4j_mod = if (build_options.enable_memory_neo4j) @import("../memory/engines/neo4j.zig") else struct {
+    pub const Neo4jMemory = struct {};
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Memory Loader — inject relevant memory context into user messages
@@ -175,6 +179,65 @@ pub fn loadContextWithRuntime(
     return try buf.toOwnedSlice(allocator);
 }
 
+/// Load context using the Neo4j graph backend with relationship traversal.
+/// Returns direct entries under [Memory context] and related entries under [Related context].
+pub fn loadContextWithGraph(
+    allocator: std.mem.Allocator,
+    neo4j: *neo4j_mod.Neo4jMemory,
+    user_message: []const u8,
+    session_id: ?[]const u8,
+) ![]const u8 {
+    if (!build_options.enable_memory_neo4j) return try allocator.dupe(u8, "");
+
+    var graph_result = neo4j.recallWithGraph(allocator, user_message, DEFAULT_RECALL_LIMIT, session_id) catch {
+        return try allocator.dupe(u8, "");
+    };
+    defer graph_result.deinit(allocator);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    var wrote_header = false;
+    var appended: usize = 0;
+
+    for (graph_result.direct) |entry| {
+        if (isInternalMemoryEntry(entry)) continue;
+        if (!wrote_header) {
+            try w.writeAll("[Memory context]\n");
+            wrote_header = true;
+        }
+        const content = truncateUtf8(entry.content, MAX_CONTEXT_BYTES / 2);
+        const sanitized = try sanitizeMemoryText(allocator, content);
+        defer allocator.free(sanitized);
+        try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, sanitized });
+        appended += 1;
+        if (appended >= DEFAULT_RECALL_LIMIT or buf.items.len >= MAX_CONTEXT_BYTES) break;
+    }
+
+    var wrote_related = false;
+    for (graph_result.related) |entry| {
+        if (isInternalMemoryEntry(entry)) continue;
+        if (buf.items.len >= MAX_CONTEXT_BYTES) break;
+        if (!wrote_related) {
+            try w.writeAll("[Related context]\n");
+            wrote_related = true;
+        }
+        const content = truncateUtf8(entry.content, MAX_CONTEXT_BYTES / 2);
+        const sanitized = try sanitizeMemoryText(allocator, content);
+        defer allocator.free(sanitized);
+        try std.fmt.format(w, "- {s}: {s}\n", .{ entry.key, sanitized });
+        appended += 1;
+        if (appended >= DEFAULT_RECALL_LIMIT * 2 or buf.items.len >= MAX_CONTEXT_BYTES) break;
+    }
+
+    if (!wrote_header and !wrote_related) {
+        return try allocator.dupe(u8, "");
+    }
+    try w.writeAll("\n");
+
+    return try buf.toOwnedSlice(allocator);
+}
+
 /// Enrich a user message with memory context prepended.
 /// If no context is available, returns an owned dupe of the original message.
 pub fn enrichMessage(
@@ -194,6 +257,7 @@ pub fn enrichMessage(
 }
 
 /// Enrich a user message using the retrieval engine if available, else raw recall.
+/// When neo4j_ptr is set and the backend supports graph-enriched recall, uses that instead.
 pub fn enrichMessageWithRuntime(
     allocator: std.mem.Allocator,
     mem: Memory,
@@ -201,6 +265,31 @@ pub fn enrichMessageWithRuntime(
     user_message: []const u8,
     session_id: ?[]const u8,
 ) ![]const u8 {
+    return enrichMessageWithRuntimeAndGraph(allocator, mem, mem_rt, null, user_message, session_id);
+}
+
+/// Full enrichment with optional Neo4j graph pointer.
+pub fn enrichMessageWithRuntimeAndGraph(
+    allocator: std.mem.Allocator,
+    mem: Memory,
+    mem_rt: ?*MemoryRuntime,
+    neo4j_ptr: ?*anyopaque,
+    user_message: []const u8,
+    session_id: ?[]const u8,
+) ![]const u8 {
+    // Try graph-enriched context first if Neo4j is available
+    if (build_options.enable_memory_neo4j and neo4j_ptr != null) {
+        const neo4j: *neo4j_mod.Neo4jMemory = @ptrCast(@alignCast(neo4j_ptr.?));
+        if (neo4j.graph_enriched_recall) {
+            const context = loadContextWithGraph(allocator, neo4j, user_message, session_id) catch try allocator.dupe(u8, "");
+            if (context.len > 0) {
+                defer allocator.free(context);
+                return try std.fmt.allocPrint(allocator, "{s}{s}", .{ context, user_message });
+            }
+            allocator.free(context);
+        }
+    }
+
     const context = if (mem_rt) |rt|
         try loadContextWithRuntime(allocator, rt, user_message, session_id)
     else

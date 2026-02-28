@@ -65,6 +65,7 @@ pub const delegate = @import("delegate.zig");
 pub const browser = @import("browser.zig");
 pub const image = @import("image.zig");
 pub const composio = @import("composio.zig");
+pub const pueue = @import("pueue.zig");
 pub const google_auth = @import("google_auth.zig");
 pub const google_mail = @import("google_mail.zig");
 pub const google_calendar = @import("google_calendar.zig");
@@ -80,6 +81,8 @@ pub const cron_run = @import("cron_run.zig");
 pub const cron_update = @import("cron_update.zig");
 pub const message = @import("message.zig");
 pub const pushover = @import("pushover.zig");
+pub const memory_relate = @import("memory_relate.zig");
+pub const memory_graph = @import("memory_graph.zig");
 pub const schema = @import("schema.zig");
 pub const web_search = @import("web_search.zig");
 pub const web_fetch = @import("web_fetch.zig");
@@ -344,6 +347,14 @@ pub fn allTools(
     mft.* = .{};
     try list.append(allocator, mft.tool());
 
+    const mrl = try allocator.create(memory_relate.MemoryRelateTool);
+    mrl.* = .{};
+    try list.append(allocator, mrl.tool());
+
+    const mgr = try allocator.create(memory_graph.MemoryGraphTool);
+    mgr.* = .{};
+    try list.append(allocator, mgr.tool());
+
     // Delegate and schedule tools
     const dlt = try allocator.create(delegate.DelegateTool);
     dlt.* = .{
@@ -361,6 +372,11 @@ pub fn allTools(
     const sp = try allocator.create(spawn.SpawnTool);
     sp.* = .{ .manager = opts.subagent_manager };
     try list.append(allocator, sp.tool());
+
+    // Pueue task manager (always available; gracefully errors if not installed)
+    const pqt = try allocator.create(pueue.PueueTool);
+    pqt.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, pqt.tool());
 
     if (opts.http_enabled) {
         const ht = try allocator.create(http_request.HttpRequestTool);
@@ -441,6 +457,12 @@ pub fn bindMemoryTools(tools: []const Tool, memory: ?Memory) void {
         } else if (t.vtable == &memory_forget.MemoryForgetTool.vtable) {
             const mt: *memory_forget.MemoryForgetTool = @ptrCast(@alignCast(t.ptr));
             mt.memory = memory;
+        } else if (t.vtable == &memory_relate.MemoryRelateTool.vtable) {
+            const mt: *memory_relate.MemoryRelateTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
+        } else if (t.vtable == &memory_graph.MemoryGraphTool.vtable) {
+            const mt: *memory_graph.MemoryGraphTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
         }
     }
 }
@@ -458,6 +480,23 @@ pub fn bindMemoryRuntime(tools: []const Tool, mem_rt: ?*memory_mod.MemoryRuntime
         } else if (t.vtable == &memory_forget.MemoryForgetTool.vtable) {
             const mt: *memory_forget.MemoryForgetTool = @ptrCast(@alignCast(t.ptr));
             mt.mem_rt = mem_rt;
+        }
+    }
+}
+
+/// Bind a Neo4j graph pointer to graph-aware tools (memory_relate, memory_graph, memory_recall).
+/// Call after bindMemoryTools when the active memory backend is Neo4j.
+pub fn bindNeo4jGraphTools(tools: []const Tool, neo4j_ptr: ?*anyopaque) void {
+    for (tools) |t| {
+        if (t.vtable == &memory_relate.MemoryRelateTool.vtable) {
+            const mt: *memory_relate.MemoryRelateTool = @ptrCast(@alignCast(t.ptr));
+            mt.neo4j_ptr = neo4j_ptr;
+        } else if (t.vtable == &memory_graph.MemoryGraphTool.vtable) {
+            const mt: *memory_graph.MemoryGraphTool = @ptrCast(@alignCast(t.ptr));
+            mt.neo4j_ptr = neo4j_ptr;
+        } else if (t.vtable == &memory_recall.MemoryRecallTool.vtable) {
+            const mt: *memory_recall.MemoryRecallTool = @ptrCast(@alignCast(t.ptr));
+            mt.neo4j_ptr = neo4j_ptr;
         }
     }
 }
@@ -669,8 +708,9 @@ test "all tools includes extras when enabled" {
     defer {
         // Free all heap-allocated tool structs (mix of types)
         // Order: shell, file_read, file_write, file_edit, git, image_info,
-        //        memory_store, memory_recall, memory_list, memory_forget, delegate, schedule,
-        //        http_request, browser
+        //        memory_store, memory_recall, memory_list, memory_forget,
+        //        memory_relate, memory_graph, delegate, schedule,
+        //        spawn, pueue, http_request, browser
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
         std.testing.allocator.destroy(@as(*file_write.FileWriteTool, @ptrCast(@alignCast(tools[2].ptr))));
@@ -681,17 +721,21 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*memory_recall.MemoryRecallTool, @ptrCast(@alignCast(tools[7].ptr))));
         std.testing.allocator.destroy(@as(*memory_list.MemoryListTool, @ptrCast(@alignCast(tools[8].ptr))));
         std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[9].ptr))));
-        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[10].ptr))));
-        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[11].ptr))));
-        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
-        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[13].ptr))));
-        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*memory_relate.MemoryRelateTool, @ptrCast(@alignCast(tools[10].ptr))));
+        std.testing.allocator.destroy(@as(*memory_graph.MemoryGraphTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*pueue.PueueTool, @ptrCast(@alignCast(tools[15].ptr))));
+        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[16].ptr))));
+        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[17].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_list + memory_forget
-    // + delegate + schedule + spawn + http_request + browser = 15
-    try std.testing.expectEqual(@as(usize, 15), tools.len);
+    // + memory_relate + memory_graph
+    // + delegate + schedule + spawn + pueue + http_request + browser = 18
+    try std.testing.expectEqual(@as(usize, 18), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -699,7 +743,8 @@ test "all tools excludes extras when disabled" {
     defer {
         // Free all heap-allocated tool structs
         // Order: shell, file_read, file_write, file_edit, git, image_info,
-        //        memory_store, memory_recall, memory_list, memory_forget, delegate, schedule, spawn
+        //        memory_store, memory_recall, memory_list, memory_forget,
+        //        memory_relate, memory_graph, delegate, schedule, spawn, pueue
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
         std.testing.allocator.destroy(@as(*file_write.FileWriteTool, @ptrCast(@alignCast(tools[2].ptr))));
@@ -710,14 +755,18 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*memory_recall.MemoryRecallTool, @ptrCast(@alignCast(tools[7].ptr))));
         std.testing.allocator.destroy(@as(*memory_list.MemoryListTool, @ptrCast(@alignCast(tools[8].ptr))));
         std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[9].ptr))));
-        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[10].ptr))));
-        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[11].ptr))));
-        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*memory_relate.MemoryRelateTool, @ptrCast(@alignCast(tools[10].ptr))));
+        std.testing.allocator.destroy(@as(*memory_graph.MemoryGraphTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[14].ptr))));
+        std.testing.allocator.destroy(@as(*pueue.PueueTool, @ptrCast(@alignCast(tools[15].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
-    // + memory_store + memory_recall + memory_list + memory_forget + delegate + schedule + spawn = 13
-    try std.testing.expectEqual(@as(usize, 13), tools.len);
+    // + memory_store + memory_recall + memory_list + memory_forget
+    // + memory_relate + memory_graph + delegate + schedule + spawn + pueue = 16
+    try std.testing.expectEqual(@as(usize, 16), tools.len);
 }
 
 test "all tools wires subagent manager into spawn tool" {

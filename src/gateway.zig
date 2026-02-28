@@ -2202,6 +2202,14 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     sm.mem_rt = rt;
                     tools_mod.bindMemoryRuntime(tools_slice, rt);
                 }
+                // Bind Neo4j graph tools when backend is Neo4j.
+                if (build_options.enable_memory_neo4j) {
+                    if (mem_opt) |m| {
+                        if (std.mem.eql(u8, m.name(), "neo4j")) {
+                            tools_mod.bindNeo4jGraphTools(tools_slice, m.ptr);
+                        }
+                    }
+                }
                 session_mgr_opt = sm;
             }
         }

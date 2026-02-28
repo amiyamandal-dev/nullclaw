@@ -4,6 +4,7 @@
 //! for `nullclaw agent`) and the streaming stdout callback.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const log = std.log.scoped(.agent);
 const Config = @import("../config.zig").Config;
 const providers = @import("../providers/root.zig");
@@ -141,6 +142,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     // Bind MemoryRuntime to memory tools for hybrid search and vector sync.
     if (mem_rt) |*rt| {
         tools_mod.bindMemoryRuntime(tools, rt);
+    }
+
+    // Bind Neo4j graph tools when backend is Neo4j.
+    if (build_options.enable_memory_neo4j) {
+        if (mem_opt) |m| {
+            if (std.mem.eql(u8, m.name(), "neo4j")) {
+                tools_mod.bindNeo4jGraphTools(tools, m.ptr);
+            }
+        }
     }
 
     // Provider interface from runtime bundle (includes retries/fallbacks).
