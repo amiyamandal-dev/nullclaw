@@ -466,22 +466,44 @@ pub fn buildAssistantHistoryWithToolCalls(
 ///
 /// Returns the original slice unchanged if no normalization is needed (no allocation).
 fn normalizeToolCallTags(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    // Known alternative closing tags emitted by various models.
-    const alt_close_tags = [_][]const u8{
+    // Per-call closing tags: replace with </tool_call>.
+    const replace_close_tags = [_][]const u8{
         "</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>", // </｜DSML｜invoke>
-        "</\xef\xbd\x9cDSML\xef\xbd\x9cfunction_calls>", // </｜DSML｜function_calls>
         "</invoke>",
+    };
+    // Container/wrapper closing tags: strip entirely (do not emit </tool_call>).
+    const strip_close_tags = [_][]const u8{
+        "</\xef\xbd\x9cDSML\xef\xbd\x9cfunction_calls>", // </｜DSML｜function_calls>
         "</function_calls>",
     };
 
     // Quick check: does input need normalization at all?
-    const has_repeated = std.mem.indexOf(u8, input, "<tool_call><tool_call>") != null or
-        std.mem.indexOf(u8, input, "<tool_call>\n<tool_call>") != null;
+    // Check for repeated <tool_call> with any whitespace between them.
+    const has_repeated = blk: {
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, input, pos, "<tool_call>")) |found| {
+            var j = found + 11;
+            while (j < input.len and (input[j] == ' ' or input[j] == '\t' or input[j] == '\r' or input[j] == '\n')) : (j += 1) {}
+            if (j + 11 <= input.len and std.mem.eql(u8, input[j .. j + 11], "<tool_call>")) {
+                break :blk true;
+            }
+            pos = found + 11;
+        }
+        break :blk false;
+    };
     var has_alt_close = false;
-    for (alt_close_tags) |tag| {
+    for (replace_close_tags) |tag| {
         if (std.mem.indexOf(u8, input, tag) != null) {
             has_alt_close = true;
             break;
+        }
+    }
+    if (!has_alt_close) {
+        for (strip_close_tags) |tag| {
+            if (std.mem.indexOf(u8, input, tag) != null) {
+                has_alt_close = true;
+                break;
+            }
         }
     }
     if (!has_repeated and !has_alt_close) return input;
@@ -514,9 +536,9 @@ fn normalizeToolCallTags(allocator: std.mem.Allocator, input: []const u8) ![]con
             continue;
         }
 
-        // Replace alternative closing tags with </tool_call>
+        // Replace per-call closing tags with </tool_call>
         var replaced = false;
-        for (alt_close_tags) |tag| {
+        for (replace_close_tags) |tag| {
             if (i + tag.len <= input.len and std.mem.eql(u8, input[i .. i + tag.len], tag)) {
                 try buf.appendSlice(allocator, "</tool_call>");
                 i += tag.len;
@@ -525,6 +547,17 @@ fn normalizeToolCallTags(allocator: std.mem.Allocator, input: []const u8) ![]con
             }
         }
         if (replaced) continue;
+
+        // Strip container/wrapper closing tags (do not emit </tool_call>)
+        var stripped = false;
+        for (strip_close_tags) |tag| {
+            if (i + tag.len <= input.len and std.mem.eql(u8, input[i .. i + tag.len], tag)) {
+                i += tag.len;
+                stripped = true;
+                break;
+            }
+        }
+        if (stripped) continue;
 
         try buf.append(allocator, input[i]);
         i += 1;
@@ -1966,6 +1999,8 @@ test "parseXmlToolCalls function-tag fallback when JSON has braces in value" {
 test "parseXmlToolCalls handles DeepSeek DSML closing tags" {
     const allocator = std.testing.allocator;
     // DeepSeek emits repeated <tool_call> and closes with </｜DSML｜invoke>
+    // followed by </｜DSML｜function_calls> (wrapper). The wrapper must be
+    // stripped, not converted to </tool_call>, so no spurious text leaks out.
     const response = "<tool_call>\n<tool_call>\n<tool_call>\n" ++
         "{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}\n" ++
         "</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>\n" ++
@@ -1981,6 +2016,28 @@ test "parseXmlToolCalls handles DeepSeek DSML closing tags" {
     }
     try std.testing.expectEqual(@as(usize, 1), result.calls.len);
     try std.testing.expectEqualStrings("shell", result.calls[0].name);
+    // No spurious </tool_call> text should leak to Telegram
+    try std.testing.expectEqualStrings("", result.text);
+}
+
+test "parseXmlToolCalls handles generic function_calls wrapper" {
+    const allocator = std.testing.allocator;
+    const response = "<tool_call>\n" ++
+        "{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}\n" ++
+        "</invoke>\n" ++
+        "</function_calls>";
+    const result = try parseXmlToolCalls(allocator, response);
+    defer {
+        if (result.text.len > 0) allocator.free(result.text);
+        for (result.calls) |call| {
+            allocator.free(call.name);
+            allocator.free(call.arguments_json);
+        }
+        allocator.free(result.calls);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.calls.len);
+    try std.testing.expectEqualStrings("shell", result.calls[0].name);
+    try std.testing.expectEqualStrings("", result.text);
 }
 
 test "normalizeToolCallTags returns original when no normalization needed" {
@@ -2002,12 +2059,31 @@ test "normalizeToolCallTags collapses repeated opening tags" {
     try std.testing.expect(std.mem.indexOf(u8, result[first + 11 ..], "<tool_call>") == null);
 }
 
+test "normalizeToolCallTags collapses CRLF-separated repeated opening tags" {
+    const allocator = std.testing.allocator;
+    const input = "<tool_call>\r\n<tool_call>\r\n{\"name\":\"shell\"}\n</tool_call>";
+    const result = try normalizeToolCallTags(allocator, input);
+    defer allocator.free(result);
+    const first = std.mem.indexOf(u8, result, "<tool_call>").?;
+    try std.testing.expect(std.mem.indexOf(u8, result[first + 11 ..], "<tool_call>") == null);
+}
+
 test "normalizeToolCallTags replaces DSML invoke closing tag" {
     const allocator = std.testing.allocator;
     const input = "<tool_call>\n{}\n</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>";
     const result = try normalizeToolCallTags(allocator, input);
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "</tool_call>") != null);
+}
+
+test "normalizeToolCallTags strips DSML function_calls wrapper tag" {
+    const allocator = std.testing.allocator;
+    const input = "<tool_call>\n{}\n</\xef\xbd\x9cDSML\xef\xbd\x9cinvoke>\n</\xef\xbd\x9cDSML\xef\xbd\x9cfunction_calls>";
+    const result = try normalizeToolCallTags(allocator, input);
+    defer allocator.free(result);
+    // Exactly one </tool_call> (from invoke), not two
+    const first_close = std.mem.indexOf(u8, result, "</tool_call>").?;
+    try std.testing.expect(std.mem.indexOf(u8, result[first_close + 12 ..], "</tool_call>") == null);
 }
 
 // ── buildAssistantHistoryWithToolCalls tests ─────────────────────
